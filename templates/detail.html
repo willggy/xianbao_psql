@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="referrer" content="no-referrer">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{{ title }}</title>
+    <link href="https://lf3-cdn-tos.bytecdntp.com/cdn/expire-1-M/bootstrap/5.3.3/css/bootstrap.min.css"
+        rel="stylesheet">
+    <link href="https://lf6-cdn-tos.bytecdntp.com/cdn/expire-1-M/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #f2f4f8;
+            --text-main: #1d1d1f;
+            --fujia-bg: #f8fbff;
+            --fujia-border: #d0e3ff;
+        }
+
+        body {
+            background: var(--bg-color);
+            min-height: 100vh;
+            padding: 15px 0;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text-main);
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        /* 返回按钮 */
+        .back-nav {
+            margin-bottom: 15px;
+        }
+
+        .back-nav a {
+            text-decoration: none;
+            color: #666;
+            font-size: 1rem;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .article-card {
+            background: #fff;
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+        }
+
+        .article-title {
+            font-size: 1.4rem;
+            font-weight: 700;
+            margin-bottom: 15px;
+            line-height: 1.4;
+        }
+
+        /* 正文内容 */
+        .article-content {
+            font-size: 1.05rem;
+            line-height: 1.8;
+            word-wrap: break-word;
+            color: #333;
+        }
+
+        /* 图片等比例缩小 + 高度上限 */
+        .article-content img {
+            max-width: 100%;
+            height: auto;
+            max-height: 70vh;
+            /* 高度上限：屏幕高度的 70%（可调 60vh ~ 80vh） */
+            object-fit: contain;
+            /* 保持比例完整显示 */
+            display: block;
+            margin: 20px auto;
+            /* 上下间距更大 + 居中 */
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            cursor: pointer;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .article-content img:hover {
+            transform: scale(1.03);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+        }
+
+        /* 附加信息 */
+        #art-fujia {
+            margin-top: 25px;
+            padding: 18px;
+            background: var(--fujia-bg);
+            border: 1px dashed var(--fujia-border);
+            border-radius: 12px;
+        }
+
+        #art-fujia::before {
+            content: "📢 附加内容 / 附件";
+            display: block;
+            font-size: 14px;
+            color: #007aff;
+            font-weight: bold;
+            margin-bottom: 12px;
+        }
+
+        /* 图片放大模态框 */
+        .image-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.95);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            overflow: auto;
+            padding: 30px;
+        }
+
+        .image-modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            border-radius: 16px;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.7);
+        }
+
+        .close-modal {
+            position: fixed;
+            top: 25px;
+            right: 35px;
+            color: #fff;
+            font-size: 60px;
+            font-weight: bold;
+            cursor: pointer;
+            text-shadow: 0 0 12px black;
+            z-index: 2001;
+            transition: transform 0.2s;
+        }
+
+        .close-modal:hover {
+            transform: scale(1.2);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container px-3">
+        <div class="back-nav">
+            <a href="/"><i class="bi bi-chevron-left me-1"></i>返回首页</a>
+        </div>
+
+        <div class="article-card">
+            <div class="article-title">{{ title }}</div>
+
+            <div class="article-content">
+                {{ content | safe }}
+            </div>
+
+            {% if art_fujia %}
+            <div id="art-fujia">
+                {{ art_fujia | safe }}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 图片放大模态框 -->
+    <div id="imageModal" class="image-modal">
+        <span class="close-modal">&times;</span>
+        <img class="modal-content" id="modalImage" alt="放大图片">
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const modal = document.getElementById('imageModal');
+            const modalImg = document.getElementById('modalImage');
+            const closeBtn = document.querySelector('.close-modal');
+
+            // 监听正文区所有图片点击
+            document.querySelector('.article-content').addEventListener('click', function (e) {
+                if (e.target.tagName === 'IMG') {
+                    modal.classList.add('active');
+                    modalImg.src = e.target.src;
+                    modalImg.alt = e.target.alt || "放大图片";
+                    document.body.style.overflow = 'hidden';
+                }
+            });
+
+            // 关闭方式
+            closeBtn.addEventListener('click', closeModal);
+            modal.addEventListener('click', function (e) {
+                if (e.target === modal || e.target === closeBtn) {
+                    closeModal();
+                }
+            });
+
+            function closeModal() {
+                modal.classList.remove('active');
+                document.body.style.overflow = 'auto';
+            }
+
+            // Esc 键关闭
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && modal.classList.contains('active')) {
+                    closeModal();
+                }
+            });
+        });
+    </script>
+</body>
+
+</html>

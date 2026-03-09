@@ -1,0 +1,7 @@
+Flask
+requests
+beautifulsoup4
+lxml
+apscheduler
+waitress
+psycopg2-binary
