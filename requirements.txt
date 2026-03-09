@@ -5,3 +5,4 @@ lxml
 apscheduler
 gunicorn
 psycopg[binary,pool]
+waitress
