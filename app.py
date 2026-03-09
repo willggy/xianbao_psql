@@ -733,22 +733,10 @@ def logout():
 
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
-    # 支持 header 或 query 参数验证
-    provided_secret = (
-        request.headers.get('Authorization') or
-        request.args.get('secret') or
-        request.form.get('secret')
-    )
-    
-    if provided_secret != CRON_SECRET:
-        return {"error": "Unauthorized"}, 401
+    # 删除了 provided_secret 的获取和 if 校验逻辑
     
     now = get_beijing_now()
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
-    # 可选：最近5分钟有人访问过就跳过，避免和高峰冲突
-    # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
-    #     print(f"[{now}] Skip cron: recent activity detected")
-    #     return {"status": "skipped", "reason": "recent activity"}, 200
     
     try:
         scrape_all_sites()
@@ -760,7 +748,6 @@ def cron_scrape():
     except Exception as e:
         print(f"Cron error: {e}")
         return {"status": "error", "message": str(e)}, 500
-
 # ==========================================
 # 4. 抓取与启动
 # ==========================================
@@ -924,4 +911,5 @@ if __name__ == '__main__':
     print("Serving on port 8080...")
 
     serve(app, host='0.0.0.0', port=8080, threads=80)
+
 
