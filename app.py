@@ -22,16 +22,16 @@ from waitress import serve
 # ==========================================
 app = Flask(__name__)
 
-# 密钥配置
+# 核心配置：全部从环境变量读取，提高安全性
 SITE_TITLE = "古希腊掌管羊毛的神"
-DATABASE_URL = "postgresql://neondb_owner:npg_aK1peCLoFlR9@ep-plain-moon-a1szlygm-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
-CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
-# 本地参数
-# ALLOW_INSECURE_DEFAULTS=1
-ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '').strip() == '1'
+DATABASE_URL = os.environ.get('DATABASE_URL')
+app.secret_key = os.environ.get('SECRET_KEY', 'fallback-key-only-for-local') # 生产环境一定要配 SECRET_KEY
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123') # 建议在环境变量配个复杂的
+CRON_SECRET = os.environ.get('CRON_SECRET', 'cron-fallback-key')
+
+# 性能配置
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 缩小到 5MB 足够了
+ALLOW_INSECURE_DEFAULTS = False # 生产环境禁用
 
 # 站点配置
 SITES_CONFIG = {
@@ -924,3 +924,4 @@ if __name__ == '__main__':
     print("Serving on port 8080...")
 
     serve(app, host='0.0.0.0', port=8080, threads=80)
+
