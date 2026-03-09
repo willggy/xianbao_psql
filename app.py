@@ -905,11 +905,19 @@ def scrape_all_sites():
         except Exception as e:
             print(f"Scrape Loop Error: {e}")
 
+import os
+
 if __name__ == '__main__':
+    # 建立一次连接测试并关闭，确保配置正确
     get_db_connection().close()
     ensure_secure_config_or_exit()
-    print("Serving on port 8080...")
+    
+    # 核心修改：从环境变量读取 PORT，如果读取不到则默认为 10000
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Serving on port {port}...")
 
-    serve(app, host='0.0.0.0', port=8080, threads=80)
+    # 将 8080 替换为变量 port
+    serve(app, host='0.0.0.0', port=port, threads=80)
+
 
 
