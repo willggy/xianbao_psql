@@ -1,8 +1,5 @@
-Flask
+flask
+gunicorn
+psycopg[binary,pool]
 requests
 beautifulsoup4
-lxml
-apscheduler
-waitress
-gunicorn
-psycopg2-binary
