@@ -30,8 +30,8 @@ ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
 # 本地参数
-ALLOW_INSECURE_DEFAULTS=1
-# ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '').strip() == '1'
+# ALLOW_INSECURE_DEFAULTS=1
+ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '').strip() == '1'
 
 # 站点配置
 SITES_CONFIG = {
@@ -105,7 +105,7 @@ def _warn(msg: str):
 def ensure_secure_config_or_exit():
     """
     上线安全保护：如果仍在使用默认密钥/默认密码，则拒绝启动。
-    本地开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
+    开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
     """
     problems = []
 
@@ -152,22 +152,22 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# def get_db_connection():
-#     """
-#     获取 Supabase Postgres 连接（依赖环境变量 DATABASE_URL）。
-#     使用 dict_row 以便 row['field'] 写法保持不变。
-#     """
-#     dsn = os.environ.get("DATABASE_URL")
-#     if not dsn:
-#         raise RuntimeError("DATABASE_URL 未设置")
-#     return psycopg.connect(dsn, row_factory=dict_row)
-# 本地
 def get_db_connection():
-    # 优先从环境变量读，如果没有，就用你在第 31 行定义的那个 DATABASE_URL
-    dsn = os.environ.get("DATABASE_URL") or DATABASE_URL 
+    """
+    获取 Supabase Postgres 连接（依赖环境变量 DATABASE_URL）。
+    使用 dict_row 以便 row['field'] 写法保持不变。
+    """
+    dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL 未设置")
     return psycopg.connect(dsn, row_factory=dict_row)
+# 本地
+# def get_db_connection():
+#     # 优先从环境变量读，如果没有，就用你在第 31 行定义的那个 DATABASE_URL
+#     dsn = os.environ.get("DATABASE_URL") or DATABASE_URL 
+#     if not dsn:
+#         raise RuntimeError("DATABASE_URL 未设置")
+#     return psycopg.connect(dsn, row_factory=dict_row)
 def make_links_clickable(text):
     # 匹配 http/https URL，但排除已经在 href= 里的情况
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
@@ -922,4 +922,5 @@ if __name__ == '__main__':
     get_db_connection().close()
     ensure_secure_config_or_exit()
     print("Serving on port 8080...")
+
     serve(app, host='0.0.0.0', port=8080, threads=80)
