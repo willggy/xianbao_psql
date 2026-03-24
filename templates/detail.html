@@ -66,15 +66,13 @@
 
         /* 图片等比例缩小 + 高度上限 */
         .article-content img {
+            width: min(72%, 560px);
             max-width: 100%;
             height: auto;
-            max-height: 70vh;
-            /* 高度上限：屏幕高度的 70%（可调 60vh ~ 80vh） */
+            max-height: 52vh;
             object-fit: contain;
-            /* 保持比例完整显示 */
             display: block;
             margin: 20px auto;
-            /* 上下间距更大 + 居中 */
             border-radius: 12px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
             cursor: pointer;
@@ -85,6 +83,14 @@
             transform: scale(1.03);
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
         }
+
+        @media (max-width: 768px) {
+            .article-content img {
+                width: 100%;
+                max-height: 46vh;
+            }
+        }
+
 
         /* 附加信息 */
         #art-fujia {

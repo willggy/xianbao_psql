@@ -143,6 +143,9 @@
                 <a href="/" class="btn btn-outline-secondary btn-sm btn-icon">
                     <i class="bi bi-house"></i> 返回首页
                 </a>
+                <a href="/logs" class="btn btn-outline-primary btn-sm btn-icon">
+                    <i class="bi bi-terminal"></i> Logs
+                </a>
                 <a href="/logout" class="btn btn-danger btn-sm btn-icon">
                     <i class="bi bi-box-arrow-right"></i> 退出
                 </a>
@@ -151,6 +154,18 @@
     </header>
 
     <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="mb-3">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
         <div class="row mb-4">
             <div class="col-md-4">
                 <div class="card stat-card p-3">
