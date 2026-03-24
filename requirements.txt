@@ -3,6 +3,6 @@ requests
 beautifulsoup4
 lxml
 apscheduler
-gunicorn
-psycopg[binary,pool]
 waitress
+psycopg[binary]
+python-dotenv

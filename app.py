@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import time
 import base64
@@ -8,7 +9,7 @@ import ipaddress
 import socket
 from datetime import datetime, timedelta, timezone
 from functools import wraps, lru_cache
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urljoin
 import psycopg
 from psycopg.rows import dict_row
 import requests
@@ -17,21 +18,34 @@ from flask import Flask, flash, render_template, request, Response, redirect, se
 from bs4 import BeautifulSoup
 from waitress import serve
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # Keep startup working even if python-dotenv is not installed yet.
+    pass
+
+try:
+    # Improve Windows console readability for Chinese logs.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # ==========================================
 # 1. 基础配置
 # ==========================================
 app = Flask(__name__)
 
-# 核心配置：全部从环境变量读取，提高安全性
+# 密钥配置
 SITE_TITLE = "古希腊掌管羊毛的神"
-DATABASE_URL = os.environ.get('DATABASE_URL')
-app.secret_key = os.environ.get('SECRET_KEY', 'fallback-key-only-for-local') # 生产环境一定要配 SECRET_KEY
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123') # 建议在环境变量配个复杂的
-CRON_SECRET = os.environ.get('CRON_SECRET', 'cron-fallback-key')
-
-# 性能配置
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 缩小到 5MB 足够了
-ALLOW_INSECURE_DEFAULTS = False # 生产环境禁用
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
+CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
+# 本地参数
+ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
 # 站点配置
 SITES_CONFIG = {
@@ -40,21 +54,46 @@ SITES_CONFIG = {
         "domain": "https://new.xianbao.fun", 
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
-        "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)"
+        "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)",
+        "original_url_selectors": [
+            "a[href*='source']",
+            "a[href*='from']",
+            "a[href*='origin']",
+            "a[href*='jump']"
+        ],
+        "original_url_regexes": [
+            r'(https?://[^\s<"\']+)'
+        ]
     },
     "iehou": { 
         "name": "爱猴线报", 
         "domain": "https://iehou.com", 
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
-        "content_selector": ".thread-content"
+        "content_selector": ".thread-content",
+        "original_url_selectors": [
+            ".thread-content a[href]",
+            "a[href*='url=']",
+            "a[href*='target=']"
+        ],
+        "original_url_regexes": [
+            r'(https?://[^\s<"\']+)'
+        ]
     },
     "xianbao_icu": {
         "name": "鲸线报",  
         "domain": "https://xianbao.icu",
         "list_url": "https://xianbao.icu/xianbao",  
         "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
-        "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text"
+        "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text",
+        "original_url_selectors": [
+            "a[href*='source']",
+            "a[href*='origin']",
+            ".article-content a[href]"
+        ],
+        "original_url_regexes": [
+            r'(https?://[^\s<"\']+)'
+        ]
    }
 }
 
@@ -105,7 +144,7 @@ def _warn(msg: str):
 def ensure_secure_config_or_exit():
     """
     上线安全保护：如果仍在使用默认密钥/默认密码，则拒绝启动。
-    开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
+    本地开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
     """
     problems = []
 
@@ -152,33 +191,125 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def get_db_connection():
-    """
-    获取 Supabase Postgres 连接（依赖环境变量 DATABASE_URL）。
-    使用 dict_row 以便 row['field'] 写法保持不变。
-    """
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("DATABASE_URL 未设置")
-    return psycopg.connect(dsn, row_factory=dict_row)
-# 本地
 # def get_db_connection():
-#     # 优先从环境变量读，如果没有，就用你在第 31 行定义的那个 DATABASE_URL
-#     dsn = os.environ.get("DATABASE_URL") or DATABASE_URL 
+#     """
+#     获取 Supabase Postgres 连接（依赖环境变量 DATABASE_URL）。
+#     使用 dict_row 以便 row['field'] 写法保持不变。
+#     """
+#     dsn = os.environ.get("DATABASE_URL")
 #     if not dsn:
 #         raise RuntimeError("DATABASE_URL 未设置")
 #     return psycopg.connect(dsn, row_factory=dict_row)
+# 本地
+def get_db_connection():
+    dsn = DATABASE_URL
+    if not dsn:
+        raise RuntimeError("DATABASE_URL not set. Configure env var DATABASE_URL before start.")
+    return psycopg.connect(dsn, row_factory=dict_row)
 def make_links_clickable(text):
     # 匹配 http/https URL，但排除已经在 href= 里的情况
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
+
+def extract_original_url(html_content, fallback_url="", site_key=""):
+    """Extract source/original URL from article HTML using per-site config first."""
+    if not html_content:
+        return fallback_url
+
+    try:
+        soup = BeautifulSoup(html_content, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html_content, "html.parser")
+
+    cfg = SITES_CONFIG.get(site_key, {}) if site_key else {}
+    selectors = cfg.get("original_url_selectors", []) or []
+    regexes = cfg.get("original_url_regexes", []) or []
+
+    def _normalize_href(href: str) -> str:
+        href = (href or "").strip()
+        if not href:
+            return ""
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = urljoin(fallback_url, href) if fallback_url else href
+        return href if href.startswith(("http://", "https://")) else ""
+
+    # 1) Site-level selectors (highest priority)
+    for sel in selectors:
+        try:
+            for a in soup.select(sel):
+                href = _normalize_href(a.get("href", ""))
+                if href:
+                    return href
+        except Exception:
+            continue
+
+    # 2) Keyword anchor text
+    keywords = ("source", "origin", "original", "from", "link", "jump")
+    for a in soup.select("a[href]"):
+        href = _normalize_href(a.get("href", ""))
+        if not href:
+            continue
+        t = a.get_text(" ", strip=True).lower()
+        if any(k.lower() in t for k in keywords):
+            return href
+
+    # 3) Site-level regex + defaults
+    text_blob = soup.get_text(" ", strip=True)
+    default_patterns = [
+        r"(?:source|origin|original|from|link)\s*[:：]?\s*(https?://[^\s<>\"']+)",
+        r"(https?://[^\s<>\"']+)",
+    ]
+    for pat in list(regexes) + default_patterns:
+        try:
+            m = re.search(pat, text_blob, flags=re.IGNORECASE)
+            if not m:
+                continue
+            if m.lastindex:
+                for i in range(1, m.lastindex + 1):
+                    cand = (m.group(i) or "").strip()
+                    if cand.startswith(("http://", "https://")):
+                        return cand
+            cand = (m.group(0) or "").strip()
+            if cand.startswith(("http://", "https://")):
+                return cand
+        except Exception:
+            continue
+
+    # 4) Fallback first http(s) link
+    for a in soup.select("a[href]"):
+        href = _normalize_href(a.get("href", ""))
+        if href:
+            return href
+
+    return fallback_url
+
+
+def safe_extract_original_url(html_content, fallback_url="", site_key=""):
+    try:
+        return extract_original_url(html_content, fallback_url=fallback_url, site_key=site_key)
+    except Exception as e:
+        print(f"[WARN] extract_original_url failed: {e}")
+        return fallback_url
 
 def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
     # 【优化】使用 lxml 解析器
+    # Convert plain URL after a colon (e.g. "????: https://...") into links.
+    html_content = re.sub(
+        r'([:?]\s*)(https?://[^\s<"]+)',
+        r'\1<a href="\2" target="_blank" rel="noopener noreferrer" style="color:#007aff; text-decoration:underline; word-break:break-all;">\2</a>',
+        html_content,
+        flags=re.IGNORECASE,
+    )
+
     soup = BeautifulSoup(html_content, "lxml")
+
+    site_cfg = SITES_CONFIG.get(site_key, {})
+    site_domain = site_cfg.get("domain", "")
 
     for tag in soup.find_all(True):
 
@@ -186,7 +317,20 @@ def clean_html(html_content, site_key):
         # 1) 图片处理逻辑
         # ============================
         if tag.name == 'img':
-            src = tag.get('src', '').strip()
+            src = (
+                tag.get('src', '').strip()
+                or tag.get('data-src', '').strip()
+                or tag.get('data-original', '').strip()
+                or tag.get('data-lazy-src', '').strip()
+            )
+
+            # srcset often looks like: "url1 1x, url2 2x"
+            if not src:
+                srcset = tag.get('srcset', '').strip() or tag.get('data-srcset', '').strip()
+                if srcset:
+                    first = srcset.split(',')[0].strip()
+                    src = first.split(' ')[0].strip()
+
             if not src:
                 continue
 
@@ -199,18 +343,29 @@ def clean_html(html_content, site_key):
                 src = 'https:' + src
 
             elif src.startswith('/'):  # /upload/xxx.jpg
-                src = SITES_CONFIG[site_key]['domain'] + src
+                if site_domain:
+                    src = urljoin(site_domain, src)
+                else:
+                    continue
 
             elif src.startswith('./'):  # ./images/xxx.jpg
-                src = SITES_CONFIG[site_key]['domain'] + src[1:]
+                if site_domain:
+                    src = urljoin(site_domain + '/', src)
+                else:
+                    continue
 
             elif src.startswith('../'):  # ../xx/xx.jpg
-                src = SITES_CONFIG[site_key]['domain'] + src.replace('../', '', 1)
+                if site_domain:
+                    src = urljoin(site_domain + '/', src)
+                else:
+                    continue
 
             # ---- 这里不做更多处理，否则容易误判 HTML 图片 ----
 
             # ---- URL 转义 + 走 img_proxy ----
-            proxy_url = "/img_proxy?url=" + quote(src, safe='/:?=&')
+            # Keep existing percent-encoding, but encode query separators (&, =)
+            # inside nested URLs so outer /img_proxy query string will not truncate.
+            proxy_url = "/img_proxy?url=" + quote(src, safe=':/?%')
 
             tag.attrs = {
                 'src': proxy_url,
@@ -234,7 +389,8 @@ def clean_html(html_content, site_key):
             if href.startswith('//'):
                 href = 'https:' + href
             elif href.startswith('/'):
-                href = SITES_CONFIG[site_key]['domain'] + href
+                if site_domain:
+                    href = urljoin(site_domain, href)
 
             # ---- 保留为正常蓝色链接 ----
             tag.attrs = {
@@ -337,11 +493,16 @@ def view():
     if not row: return "内容不存在", 404
     
     url, site_key, title = row["url"], row["site_source"], row["title"]
+    original_url = url
     cached = conn.execute("SELECT content FROM article_content WHERE url=%s", (url,)).fetchone()
     content = ""
 
     if cached and cached['content']:
-        content = cached["content"] if site_key == "user" else clean_html(cached["content"], site_key)
+        original_url = safe_extract_original_url(cached["content"], fallback_url=url, site_key=site_key)
+        if site_key == "user" or site_key not in SITES_CONFIG:
+            content = cached["content"]
+        else:
+            content = clean_html(cached["content"], site_key)
     elif site_key in SITES_CONFIG:
         try:
             r = session_req.get(url, timeout=10)
@@ -383,6 +544,7 @@ def view():
                         (url, full_raw_content),
                     )
                     conn.commit()
+                    original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
                     content = "暂无核心内容"
@@ -402,6 +564,7 @@ def view():
                         (url, full_raw_content),
                     )
                     conn.commit()
+                    original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
                     content = "暂无内容"
@@ -410,7 +573,7 @@ def view():
             print(f"Error fetching content: {e}")
             content = "加载原文失败，请尝试点击右上角原文链接。"
     conn.close()
-    return render_template("detail.html", title=title, content=content, original_url=url, time=row['original_time'])
+    return render_template("detail.html", title=title, content=content, original_url=original_url, time=row['original_time'])
 
 @app.route('/admin')
 @login_required
@@ -451,19 +614,31 @@ def admin_panel():
     }
     return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, my_articles=my_articles, stats=stats)
 @app.route('/admin/refresh', methods=['GET', 'POST'])
-@login_required  # 必须登录才能手动刷新（最安全）
+@login_required  # manual refresh requires login
 def admin_refresh():
     now = get_beijing_now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 手动刷新触发 by admin")
-    
-    try:
-        scrape_all_sites()  # 直接调用抓取函数
-        flash("手动刷新成功！已抓取最新内容", "success")  # Flask flash 提示
-    except Exception as e:
-        print(f"手动刷新失败: {e}")
-        flash(f"刷新失败：{str(e)}", "error")
-    
-    return redirect(url_for('admin_panel'))  # 刷新后跳回 admin 面板
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] admin manual refresh triggered")
+
+    summary = scrape_all_sites()
+    status = (summary or {}).get("status", "error")
+
+    if status == "success":
+        site_stats = (summary or {}).get("site_stats", {})
+        site_desc = ", ".join(
+            [f"{k} +{int(v.get('new', 0))}" for k, v in site_stats.items()]
+        ) or "No site stats"
+        flash(
+            f"Scrape success: +{int(summary.get('total_new', 0))} new, {summary.get('duration_sec', 0):.1f}s. {site_desc}",
+            "success",
+        )
+    elif status == "skipped":
+        reason = summary.get("reason", "skipped")
+        flash(f"Scrape skipped: {reason}, {summary.get('duration_sec', 0):.1f}s", "warning")
+    else:
+        err = summary.get("error", "unknown error")
+        flash(f"Scrape failed: {err}", "danger")
+
+    return redirect(url_for('admin_panel'))  # back to admin panel
 
 @app.route('/publish', methods=['GET', 'POST'])
 @login_required
@@ -666,9 +841,11 @@ def img_proxy():
         return "", 404
 
     try:
+        dynamic_referer = f"{parsed.scheme}://{host}/" if host else ""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://new.xianbao.fun/",  # 关键：用源站域名
+            # Use target site as Referer to reduce anti-hotlink false negatives.
+            "Referer": dynamic_referer,
             "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -682,7 +859,16 @@ def img_proxy():
         }
 
         # 【优化】使用 stream=True 进行流式传输，显著降低 RAM 占用
+        # Some image hosts reject unknown Referer values; retry once without Referer.
         r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
+        if r.status_code in (401, 403, 404):
+            try:
+                r.close()
+            except Exception:
+                pass
+            headers_no_referer = dict(headers)
+            headers_no_referer.pop("Referer", None)
+            r = session_req.get(url, headers=headers_no_referer, timeout=15, stream=True, allow_redirects=True)
 
         # SSRF 防护：如果发生跳转，二次校验最终落点（防止跳到内网）
         final_url = getattr(r, "url", "") or url
@@ -733,21 +919,31 @@ def logout():
 
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
-    # 删除了 provided_secret 的获取和 if 校验逻辑
+    # 支持 header 或 query 参数验证
+    provided_secret = (
+        request.headers.get('Authorization') or
+        request.args.get('secret') or
+        request.form.get('secret')
+    )
+    
+    if provided_secret != CRON_SECRET:
+        return {"error": "Unauthorized"}, 401
     
     now = get_beijing_now()
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
+    # 可选：最近5分钟有人访问过就跳过，避免和高峰冲突
+    # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
+    #     print(f"[{now}] Skip cron: recent activity detected")
+    #     return {"status": "skipped", "reason": "recent activity"}, 200
     
     try:
-        scrape_all_sites()
-        return {
-            "status": "success",
-            "executed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "message": "抓取完成"
-        }, 200
+        summary = scrape_all_sites()
+        summary["executed_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        return summary, 200
     except Exception as e:
         print(f"Cron error: {e}")
         return {"status": "error", "message": str(e)}, 500
+
 # ==========================================
 # 4. 抓取与启动
 # ==========================================
@@ -765,76 +961,94 @@ def normalize_title(title_text):
 
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
+    started_at = time.time()
+
     if scrape_lock.locked():
-        print("抓取锁被占用，跳过本次执行")
-        return
-    
+        print("scrape lock busy, skip this run")
+        return {
+            "status": "skipped",
+            "reason": "lock_busy",
+            "site_stats": {},
+            "total_new": 0,
+            "duration_sec": round(time.time() - started_at, 2),
+        }
+
     with scrape_lock:
+        conn = None
+        site_stats = {}
         try:
             now_beijing = get_beijing_now()
-            
-            # 无人访问休眠逻辑
+
+            # Sleep mode: skip when no user activity for a long time.
             if (now_beijing - LAST_ACTIVE_TIME).total_seconds() > 3600:
                 if now_beijing.minute % 60 == 0:
-                    print(f"[{now_beijing.strftime('%H:%M')}] 系统处于无人访问休眠状态...")
-                return
+                    print(f"[{now_beijing.strftime('%H:%M')}] inactive >1h, skip scrape")
+                return {
+                    "status": "skipped",
+                    "reason": "inactive_sleep",
+                    "site_stats": {},
+                    "total_new": 0,
+                    "duration_sec": round(time.time() - started_at, 2),
+                }
 
-            # 夜间低频模式
-            if 1 <= now_beijing.hour <= 5:
-                if now_beijing.minute % 30 != 0:
-                    return
+            # Night low-frequency mode.
+            if 1 <= now_beijing.hour <= 5 and now_beijing.minute % 30 != 0:
+                return {
+                    "status": "skipped",
+                    "reason": "night_low_frequency_window",
+                    "site_stats": {},
+                    "total_new": 0,
+                    "duration_sec": round(time.time() - started_at, 2),
+                }
 
             conn = get_db_connection()
             rules = conn.execute("SELECT * FROM config_rules").fetchall()
             title_white = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='title']
             title_black = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='title']
             url_black   = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='url']
-            
+
             base_keywords = ALL_BANK_VALS + title_white
-            stats = {}
-            
-            # 用于本次抓取去重的集合（标题标准化后）
+            log_stats = {}
+
+            # ?????????????????????????????
             seen_titles_this_run = set()
-            
-            # 【新增】获取最近30分钟的标题用于跨任务去重
+
+            # ?????????????0??????????????????
             recent_articles = conn.execute(
                 "SELECT title FROM articles WHERE updated_at > (now() - interval '30 minutes')"
             ).fetchall()
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
 
             for skey, cfg in SITES_CONFIG.items():
+                count = 0
                 try:
-                    print(f"\n=== 开始抓取 {cfg['name']} ({skey}) ===")
+                    print(f"\n=== start scrape: {skey} ===")
                     r = session_req.get(cfg['list_url'], timeout=15)
-                    print(f"  状态码: {r.status_code}")
-                    
-                    # 【优化】改用 lxml 解析器，内存占用更低
+                    print(f"  status: {r.status_code}")
+
+                    # ??????????lxml ???????????????
                     soup = BeautifulSoup(r.text, "lxml")
                     items = soup.select(cfg['list_selector'])
-                    print(f"  找到 {len(items)} 个匹配项")
-                    
-                    count = 0
+                    print(f"  matched items: {len(items)}")
+
                     for idx, item in enumerate(items, 1):
-                        # --- 修改后的 a 标签提取逻辑 ---
                         if item.name == 'a':
                             a = item
                         else:
                             a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='/detail'], a[href*='/xianbao/detail']") or item.find("a")
-                        
+
                         if not a:
                             continue
-                        
-                        # 标题和 URL 必须从 a 取
+
                         t = a.get_text(strip=True).strip()
                         if not t or len(t) < 5:
                             continue
-                        
+
                         h = a.get("href", "")
                         url = h if h.startswith("http") else (cfg['domain'] + (h if h.startswith("/") else "/" + h))
                         lower_t = t.lower()
                         lower_url = url.lower()
-                        
-                        # --- 标题规范化 + 本次运行/近30分钟去重（去符号/去空白/统一大小写） ---
+
                         norm_title = normalize_title(t)
                         if not norm_title:
                             continue
@@ -842,31 +1056,23 @@ def scrape_all_sites():
                             continue
                         if norm_title in recent_norm_titles:
                             continue
-                        
-                        
-                        # jd/tb 过滤
+
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
-                            # print(f"  [{skey} {idx:02d}] jd/tb 过滤跳过")
                             continue
-                        
-                        # 黑名单过滤
+
                         black_hit = any(b in url for b in url_black) or any(b in t for b in title_black)
                         if black_hit:
-                            # print(f"  [{skey} {idx:02d}] 被黑名单过滤跳过")
                             continue
-                        
-                        # 关键词匹配
+
                         kw = next((k for k in base_keywords if k.lower() in lower_t), None)
                         if kw:
-                            # 只对“会被写入数据库”的候选做本次运行去重，避免误伤（如先遇到黑名单 URL）
                             seen_titles_this_run.add(norm_title)
                             tag = kw
                             for b_name, b_v in BANK_KEYWORDS.items():
                                 if kw in b_v:
                                     tag = b_name
                                     break
-                            
-                            # 使用 ON CONFLICT(url) 防止重复 URL
+
                             with conn.cursor() as cur:
                                 cur.execute(
                                     'INSERT INTO articles (title, url, site_source, match_keyword, original_time) '
@@ -874,50 +1080,57 @@ def scrape_all_sites():
                                     'ON CONFLICT (url) DO NOTHING',
                                     (t, url, skey, tag, now_beijing.strftime("%H:%M")),
                                 )
-                                # rowcount > 0 表示成功插入新行；0 表示因 ON CONFLICT 跳过
                                 if cur.rowcount > 0:
                                     count += 1
-                    
-                    # 【核心优化】显式销毁解析树，手动触发垃圾回收
+
                     soup.decompose()
                     gc.collect()
-                    
-                    stats[cfg['name']] = count
-                
+
+                    site_stats[skey] = {"name": cfg['name'], "new": count, "status": "ok"}
+                    log_stats[cfg['name']] = count
+
                 except Exception as e:
-                    print(f"抓取 {skey} 失败: {e}")
-                    stats[cfg['name']] = "Error"
-                
-                print(f"  {cfg['name']} 本次新增: {count} 条\n")
-            
-            # --- 清理旧数据 ---
+                    print(f"scrape error on {skey}: {e}")
+                    site_stats[skey] = {"name": cfg.get('name', skey), "new": 0, "status": "error", "error": str(e)}
+                    log_stats[cfg.get('name', skey)] = "Error"
+
+                print(f"  {skey} new items: {count}")
+
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < (now() - interval '4 days')")
-            
-            # --- 记录日志 ---
+
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
-                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {stats}",),
+                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats}",),
             )
-            
+
             conn.commit()
-            conn.close()
-            
+
+            total_new = sum(int(v.get("new", 0)) for v in site_stats.values())
+            return {
+                "status": "success",
+                "site_stats": site_stats,
+                "total_new": total_new,
+                "duration_sec": round(time.time() - started_at, 2),
+            }
+
         except Exception as e:
             print(f"Scrape Loop Error: {e}")
-
-import os
+            return {
+                "status": "error",
+                "error": str(e),
+                "site_stats": site_stats,
+                "total_new": sum(int(v.get("new", 0)) for v in site_stats.values()) if site_stats else 0,
+                "duration_sec": round(time.time() - started_at, 2),
+            }
+        finally:
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
 
 if __name__ == '__main__':
-    # 建立一次连接测试并关闭，确保配置正确
     get_db_connection().close()
     ensure_secure_config_or_exit()
-    
-    # 核心修改：从环境变量读取 PORT，如果读取不到则默认为 10000
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Serving on port {port}...")
-
-    # 将 8080 替换为变量 port
-    serve(app, host='0.0.0.0', port=port, threads=80)
-
-
-
+    print("Serving on port 8080...")
+    serve(app, host='0.0.0.0', port=8080, threads=80)
