@@ -979,27 +979,7 @@ def scrape_all_sites():
         try:
             now_beijing = get_beijing_now()
 
-            # Sleep mode: skip when no user activity for a long time.
-            if (now_beijing - LAST_ACTIVE_TIME).total_seconds() > 3600:
-                if now_beijing.minute % 60 == 0:
-                    print(f"[{now_beijing.strftime('%H:%M')}] inactive >1h, skip scrape")
-                return {
-                    "status": "skipped",
-                    "reason": "inactive_sleep",
-                    "site_stats": {},
-                    "total_new": 0,
-                    "duration_sec": round(time.time() - started_at, 2),
-                }
-
-            # Night low-frequency mode.
-            if 1 <= now_beijing.hour <= 5 and now_beijing.minute % 30 != 0:
-                return {
-                    "status": "skipped",
-                    "reason": "night_low_frequency_window",
-                    "site_stats": {},
-                    "total_new": 0,
-                    "duration_sec": round(time.time() - started_at, 2),
-                }
+            # Always run when triggered (cron/manual), no sleep throttling.
 
             conn = get_db_connection()
             rules = conn.execute("SELECT * FROM config_rules").fetchall()
