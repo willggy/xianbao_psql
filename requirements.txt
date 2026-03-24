@@ -6,3 +6,4 @@ apscheduler
 waitress
 psycopg[binary]
 python-dotenv
+gunicorn
