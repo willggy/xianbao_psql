@@ -293,6 +293,20 @@ def safe_extract_original_url(html_content, fallback_url="", site_key=""):
         print(f"[WARN] extract_original_url failed: {e}")
         return fallback_url
 
+
+def normalize_image_url(url: str) -> str:
+    """Normalize unstable image URLs from specific hosts."""
+    if not url:
+        return url
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if host.endswith("pic.xiaodigu.cn"):
+            return f"{p.scheme}://{p.netloc}{p.path}"
+    except Exception:
+        return url
+    return url
+
 def clean_html(html_content, site_key):
     if not html_content:
         return ""
@@ -365,6 +379,8 @@ def clean_html(html_content, site_key):
             # ---- URL 转义 + 走 img_proxy ----
             # Keep existing percent-encoding, but encode query separators (&, =)
             # inside nested URLs so outer /img_proxy query string will not truncate.
+            src = normalize_image_url(src)
+
             proxy_url = "/img_proxy?url=" + quote(src, safe=':/?%')
 
             tag.attrs = {
@@ -780,7 +796,15 @@ def img_proxy():
     if not raw:
         return "", 404
 
-    url = unquote(raw)
+    # request.args has already URL-decoded once. Decoding again may break
+    # signed/processed image params such as %7Cwatermark.
+    url = raw
+    # If caller passed fully encoded URL (e.g. https%3A%2F%2F...), decode once.
+    if not url.startswith(("http://", "https://")) and ("%3A" in url or "%2F" in url):
+        try:
+            url = unquote(url)
+        except Exception:
+            pass
 
     if url.startswith("/img_proxy"):
         print("[WARN] Blocked nested img_proxy:", url)
