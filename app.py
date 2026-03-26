@@ -7,6 +7,8 @@ import re
 import gc  # 用于手动回收内存
 import ipaddress
 import socket
+from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import wraps, lru_cache
 from urllib.parse import quote, unquote, urlparse, urljoin
@@ -44,6 +46,9 @@ app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
+FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
+WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "").strip()
+ALERT_ENABLED = os.environ.get("ALERT_ENABLED", "0").strip() == "1"
 # 本地参数
 ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
@@ -55,6 +60,8 @@ SITES_CONFIG = {
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
         "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)",
+        "scrape_interval_min": 2,
+        "max_items_per_run": 80,
         "original_url_selectors": [
             "a[href*='source']",
             "a[href*='from']",
@@ -71,6 +78,8 @@ SITES_CONFIG = {
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
         "content_selector": ".thread-content",
+        "scrape_interval_min": 4,
+        "max_items_per_run": 40,
         "original_url_selectors": [
             ".thread-content a[href]",
             "a[href*='url=']",
@@ -86,6 +95,8 @@ SITES_CONFIG = {
         "list_url": "https://xianbao.icu/xianbao",  
         "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
         "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text",
+        "scrape_interval_min": 4,
+        "max_items_per_run": 40,
         "original_url_selectors": [
             "a[href*='source']",
             "a[href*='origin']",
@@ -105,6 +116,14 @@ BANK_KEYWORDS = {
     "中行": ["中行", "中国银行", "中hang"]
 }
 ALL_BANK_VALS = [word for words in BANK_KEYWORDS.values() for word in words]
+
+ALERT_GROUPS = {
+    "农行": ["农行", "农业银行", "农", "nh"],
+    "工行": ["工行", "工商银行", "工", "gh"],
+    "建行": ["建行", "建设银行", "建", "CCB", "jh"],
+    "中行": ["中行", "中国银行", "中hang"],
+}
+TITLE_SIMILARITY_THRESHOLD = 0.85
 
 # 数据库路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -459,7 +478,7 @@ def index():
     # --- 修改后的 3 分钟刷新逻辑 ---
     # 计算相对于当前小时，下一个 3 分钟的整点
     # 例如：13:01 -> 13:03, 13:05 -> 13:06
-    next_interval = ((now.minute // 3) + 1) * 3
+    next_interval = ((now.minute // 2) + 1) * 2
     
     if next_interval >= 60:
         next_refresh_obj = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
@@ -596,7 +615,7 @@ def view():
 def admin_panel():
     conn = get_db_connection()
     # 1. 先初始化所有变量，防止 UnboundLocalError
-    whitelist, blacklist, my_articles = [], [], []
+    whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
     last_update = "尚未开始抓取"
     
@@ -604,6 +623,7 @@ def admin_panel():
         # 2. 执行数据库查询
         whitelist = conn.execute("SELECT * FROM config_rules WHERE rule_type='white'").fetchall()
         blacklist = conn.execute("SELECT * FROM config_rules WHERE rule_type='black'").fetchall()
+        alertlist = conn.execute("SELECT * FROM config_rules WHERE rule_type='alert'").fetchall()
         my_articles = conn.execute("SELECT id, title, is_top, updated_at FROM articles WHERE site_source='user' ORDER BY is_top DESC, id DESC").fetchall()
         
         last_log = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY id DESC LIMIT 1').fetchone()
@@ -628,7 +648,7 @@ def admin_panel():
         'total_visits': total_visits, 
         'last_update': last_update
     }
-    return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, my_articles=my_articles, stats=stats)
+    return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, alertlist=alertlist, my_articles=my_articles, stats=stats)
 @app.route('/admin/refresh', methods=['GET', 'POST'])
 @login_required  # manual refresh requires login
 def admin_refresh():
@@ -643,8 +663,10 @@ def admin_refresh():
         site_desc = ", ".join(
             [f"{k} +{int(v.get('new', 0))}" for k, v in site_stats.items()]
         ) or "No site stats"
+        notified = int(summary.get("notified", 0))
+        skipped_desc = ", ".join(summary.get("skipped_sites", [])) or "none"
         flash(
-            f"Scrape success: +{int(summary.get('total_new', 0))} new, {summary.get('duration_sec', 0):.1f}s. {site_desc}",
+            f"Scrape success: +{int(summary.get('total_new', 0))} new, notify {notified}, {summary.get('duration_sec', 0):.1f}s. {site_desc}. skipped: {skipped_desc}",
             "success",
         )
     elif status == "skipped":
@@ -758,6 +780,33 @@ def api_rule():
         conn.commit()
     except Exception as e:
         print(f"规则操作失败: {e}")
+    finally:
+        conn.close()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/sync-bank-alerts', methods=['POST'])
+@login_required
+def sync_bank_alerts():
+    conn = get_db_connection()
+    added = 0
+    try:
+        for keywords in BANK_KEYWORDS.values():
+            for keyword in keywords:
+                kw = (keyword or "").strip()
+                if not kw:
+                    continue
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (keyword, match_scope) DO NOTHING",
+                        ("alert", kw, "title"),
+                    )
+                    added += cur.rowcount
+        conn.commit()
+        flash(f"Bank keywords synced to alert rules: +{added}", "success")
+    except Exception as e:
+        conn.rollback()
+        flash(f"Sync bank alert rules failed: {e}", "danger")
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -983,6 +1032,156 @@ def normalize_title(title_text):
     t = re.sub(f"[{re.escape(punctuation)}]", "", t)
     return t.lower()
 
+def is_similar_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THRESHOLD):
+    if not norm_title:
+        return False
+    for existing in norm_titles:
+        if not existing:
+            continue
+        if norm_title == existing:
+            return True
+        if abs(len(norm_title) - len(existing)) > 8:
+            continue
+        if SequenceMatcher(None, norm_title, existing).ratio() >= threshold:
+            return True
+    return False
+
+def ensure_runtime_tables(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scrape_state (
+            site_key TEXT PRIMARY KEY,
+            last_run_at TIMESTAMP,
+            last_seen_url TEXT,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+
+def load_scrape_state(conn):
+    rows = conn.execute("SELECT site_key, last_run_at, last_seen_url FROM scrape_state").fetchall()
+    return {row["site_key"]: row for row in rows}
+
+def is_site_due(cfg, state_row, now_beijing):
+    interval_min = int(cfg.get("scrape_interval_min", 3))
+    if not state_row or not state_row.get("last_run_at"):
+        return True
+    last_run_at = state_row["last_run_at"]
+    return (now_beijing - last_run_at).total_seconds() >= interval_min * 60
+
+def update_scrape_state(conn, site_key, last_seen_url, run_at):
+    conn.execute(
+        """
+        INSERT INTO scrape_state (site_key, last_run_at, last_seen_url, updated_at)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (site_key) DO UPDATE
+        SET last_run_at = EXCLUDED.last_run_at,
+            last_seen_url = COALESCE(EXCLUDED.last_seen_url, scrape_state.last_seen_url),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (site_key, run_at, last_seen_url),
+    )
+
+def match_alert_group(title_lower, url, title_alert, url_alert):
+    matched_title = next((k for k in title_alert if k.lower() in title_lower), None)
+    matched_url = next((k for k in url_alert if k in url), None)
+    matched = matched_title or matched_url
+    if not matched:
+        return None
+
+    matched_lower = matched.lower()
+    for group_name, aliases in ALERT_GROUPS.items():
+        for alias in aliases:
+            if alias.lower() == matched_lower:
+                return group_name
+    return matched
+
+def fetch_site_candidates(skey, cfg, last_seen_url):
+    result = {
+        "site_key": skey,
+        "site_name": cfg.get("name", skey),
+        "candidates": [],
+        "last_seen_url": last_seen_url or "",
+        "matched_items": 0,
+        "status": "ok",
+    }
+
+    try:
+        print(f"\n=== start scrape: {skey} ===")
+        r = session_req.get(cfg["list_url"], timeout=15)
+        print(f"  status: {r.status_code}")
+        r.raise_for_status()
+
+        soup = BeautifulSoup(r.text, "lxml")
+        items = soup.select(cfg["list_selector"])
+        result["matched_items"] = len(items)
+        print(f"  matched items: {len(items)}")
+
+        max_items = int(cfg.get("max_items_per_run", 12))
+        newest_url = ""
+
+        for item in items:
+            if item.name == "a":
+                a = item
+            else:
+                a = item.select_one(
+                    "a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='/detail'], a[href*='/xianbao/detail']"
+                ) or item.find("a")
+
+            if not a:
+                continue
+
+            title = a.get_text(strip=True).strip()
+            if not title or len(title) < 5:
+                continue
+
+            href = a.get("href", "")
+            url = href if href.startswith("http") else (cfg["domain"] + (href if href.startswith("/") else "/" + href))
+            if not newest_url:
+                newest_url = url
+                result["last_seen_url"] = newest_url
+
+            if last_seen_url and url == last_seen_url:
+                break
+
+            result["candidates"].append({"title": title, "url": url})
+            if len(result["candidates"]) >= max_items:
+                break
+
+        soup.decompose()
+        gc.collect()
+        return result
+    except Exception as e:
+        print(f"scrape error on {skey}: {e}")
+        result["status"] = "error"
+        result["error"] = str(e)
+        return result
+
+def send_match_notifications(new_articles):
+    if not ALERT_ENABLED or not new_articles:
+        return 0
+
+    sent = 0
+    for article in new_articles:
+        text = f"线报-{article['alert_keyword']}\n{article['title']}\n{article['url']}"
+
+        if FEISHU_WEBHOOK:
+            try:
+                requests.post(FEISHU_WEBHOOK, json={"msg_type": "text", "content": {"text": text}}, timeout=8)
+                sent += 1
+            except Exception as e:
+                print(f"feishu notify error: {e}")
+
+        if WECHAT_WEBHOOK:
+            try:
+                requests.post(WECHAT_WEBHOOK, json={"msgtype": "text", "text": {"content": text}}, timeout=8)
+                sent += 1
+            except Exception as e:
+                print(f"wechat notify error: {e}")
+
+    return sent
+
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
     started_at = time.time()
@@ -1002,74 +1201,82 @@ def scrape_all_sites():
         site_stats = {}
         try:
             now_beijing = get_beijing_now()
-
-            # Always run when triggered (cron/manual), no sleep throttling.
-
             conn = get_db_connection()
+            ensure_runtime_tables(conn)
+
             rules = conn.execute("SELECT * FROM config_rules").fetchall()
-            title_white = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='title']
-            title_black = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='title']
-            url_black   = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='url']
+            title_white = [r['keyword'] for r in rules if r['rule_type'] == 'white' and r['match_scope'] == 'title']
+            title_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'title']
+            url_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'url']
+            title_alert = [r['keyword'] for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'title']
+            url_alert = [r['keyword'] for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'url']
 
             base_keywords = ALL_BANK_VALS + title_white
+            state_map = load_scrape_state(conn)
+            due_sites = []
+            skipped_sites = []
             log_stats = {}
 
-            # ?????????????????????????????
-            seen_titles_this_run = set()
+            for skey, cfg in SITES_CONFIG.items():
+                state_row = state_map.get(skey)
+                if is_site_due(cfg, state_row, now_beijing):
+                    due_sites.append((skey, cfg, (state_row or {}).get("last_seen_url") or ""))
+                else:
+                    skipped_sites.append(skey)
+                    site_stats[skey] = {"name": cfg.get("name", skey), "new": 0, "status": "skipped"}
+                    log_stats[skey] = "skipped"
 
-            # ?????????????0??????????????????
+            seen_titles_this_run = set()
             recent_articles = conn.execute(
                 "SELECT title FROM articles WHERE updated_at > (now() - interval '30 minutes')"
             ).fetchall()
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
+            inserted_articles = []
 
-            for skey, cfg in SITES_CONFIG.items():
-                count = 0
-                try:
-                    print(f"\n=== start scrape: {skey} ===")
-                    r = session_req.get(cfg['list_url'], timeout=15)
-                    print(f"  status: {r.status_code}")
+            if due_sites:
+                max_workers = min(len(due_sites), 3)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(fetch_site_candidates, skey, cfg, last_seen_url): (skey, cfg)
+                        for skey, cfg, last_seen_url in due_sites
+                    }
 
-                    # ??????????lxml ???????????????
-                    soup = BeautifulSoup(r.text, "lxml")
-                    items = soup.select(cfg['list_selector'])
-                    print(f"  matched items: {len(items)}")
+                    for future in as_completed(futures):
+                        skey, cfg = futures[future]
+                        result = future.result()
+                        count = 0
 
-                    for idx, item in enumerate(items, 1):
-                        if item.name == 'a':
-                            a = item
-                        else:
-                            a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='/detail'], a[href*='/xianbao/detail']") or item.find("a")
-
-                        if not a:
+                        if result.get("status") != "ok":
+                            site_stats[skey] = {
+                                "name": cfg.get("name", skey),
+                                "new": 0,
+                                "status": "error",
+                                "error": result.get("error", "unknown error"),
+                            }
+                            log_stats[skey] = "error"
+                            update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                             continue
 
-                        t = a.get_text(strip=True).strip()
-                        if not t or len(t) < 5:
-                            continue
+                        for item in result["candidates"]:
+                            title = item["title"]
+                            url = item["url"]
+                            lower_t = title.lower()
+                            lower_url = url.lower()
+                            norm_title = normalize_title(title)
 
-                        h = a.get("href", "")
-                        url = h if h.startswith("http") else (cfg['domain'] + (h if h.startswith("/") else "/" + h))
-                        lower_t = t.lower()
-                        lower_url = url.lower()
+                            if not norm_title:
+                                continue
+                            if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
+                                continue
+                            if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
+                                continue
+                            if any(b in url for b in url_black) or any(b in title for b in title_black):
+                                continue
 
-                        norm_title = normalize_title(t)
-                        if not norm_title:
-                            continue
-                        if norm_title in seen_titles_this_run:
-                            continue
-                        if norm_title in recent_norm_titles:
-                            continue
+                            kw = next((k for k in base_keywords if k.lower() in lower_t), None)
+                            if not kw:
+                                continue
 
-                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
-                            continue
-
-                        black_hit = any(b in url for b in url_black) or any(b in t for b in title_black)
-                        if black_hit:
-                            continue
-
-                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
-                        if kw:
                             seen_titles_this_run.add(norm_title)
                             tag = kw
                             for b_name, b_v in BANK_KEYWORDS.items():
@@ -1082,38 +1289,42 @@ def scrape_all_sites():
                                     'INSERT INTO articles (title, url, site_source, match_keyword, original_time) '
                                     'VALUES (%s, %s, %s, %s, %s) '
                                     'ON CONFLICT (url) DO NOTHING',
-                                    (t, url, skey, tag, now_beijing.strftime("%H:%M")),
+                                    (title, url, skey, tag, now_beijing.strftime("%H:%M")),
                                 )
                                 if cur.rowcount > 0:
                                     count += 1
+                                    matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
+                                    if matched_alert:
+                                        inserted_articles.append(
+                                            {
+                                                "title": title,
+                                                "url": url,
+                                                "tag": tag,
+                                                "site_key": skey,
+                                                "alert_keyword": matched_alert,
+                                            }
+                                        )
 
-                    soup.decompose()
-                    gc.collect()
-
-                    site_stats[skey] = {"name": cfg['name'], "new": count, "status": "ok"}
-                    log_stats[cfg['name']] = count
-
-                except Exception as e:
-                    print(f"scrape error on {skey}: {e}")
-                    site_stats[skey] = {"name": cfg.get('name', skey), "new": 0, "status": "error", "error": str(e)}
-                    log_stats[cfg.get('name', skey)] = "Error"
-
-                print(f"  {skey} new items: {count}")
+                        site_stats[skey] = {"name": cfg.get("name", skey), "new": count, "status": "ok"}
+                        log_stats[skey] = count
+                        update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
+                        print(f"  {skey} new items: {count}")
 
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < (now() - interval '4 days')")
-
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
                 (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats}",),
             )
-
             conn.commit()
 
+            notified = send_match_notifications(inserted_articles)
             total_new = sum(int(v.get("new", 0)) for v in site_stats.values())
             return {
                 "status": "success",
                 "site_stats": site_stats,
                 "total_new": total_new,
+                "notified": notified,
+                "skipped_sites": skipped_sites,
                 "duration_sec": round(time.time() - started_at, 2),
             }
 
