@@ -49,6 +49,10 @@ CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
 WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "").strip()
 ALERT_ENABLED = os.environ.get("ALERT_ENABLED", "0").strip() == "1"
+PUBLIC_BASE_URL = (
+    os.environ.get("PUBLIC_BASE_URL", "").strip()
+    or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+).rstrip("/")
 # 本地参数
 ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
@@ -918,6 +922,10 @@ def img_proxy():
         return any(_is_ip_private_or_disallowed(ip) for ip in resolved)
 
     host = parsed.hostname or ""
+    if host.lower() == "pic.xiaodigu.cn" and parsed.scheme == "https":
+        url = "http://" + url[len("https://"):]
+        parsed = urlparse(url)
+        host = parsed.hostname or host
     trusted_host = host.lower() in TRUSTED_IMAGE_HOSTS
     if not trusted_host and _host_resolves_to_disallowed_ip(host):
         print("[WARN] Blocked SSRF host:", host, "url:", url)
@@ -1172,6 +1180,14 @@ def fetch_site_candidates(skey, cfg, last_seen_url):
         result["error"] = str(e)
         return result
 
+def build_article_view_url(article_id):
+    if not article_id:
+        return ""
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/view?id={article_id}"
+    return f"/view?id={article_id}"
+
+
 def send_match_notifications(new_articles):
     if not ALERT_ENABLED or not new_articles:
         return 0
@@ -1179,7 +1195,8 @@ def send_match_notifications(new_articles):
     sent = 0
     for article in new_articles:
         alert_title = f"线报-{article['alert_keyword']}"
-        text = f"{alert_title}\n{article['title']}\n{article['url']}"
+        notify_url = article.get("view_url") or article["url"]
+        text = f"{alert_title}\n{article['title']}\n{notify_url}"
 
         if FEISHU_WEBHOOK:
             try:
@@ -1197,6 +1214,7 @@ def send_match_notifications(new_articles):
                         }
                     },
                 }
+                feishu_payload["content"]["post"]["zh_cn"]["content"][1][0]["href"] = notify_url
                 requests.post(FEISHU_WEBHOOK, json=feishu_payload, timeout=8)
                 sent += 1
             except Exception as e:
@@ -1317,15 +1335,19 @@ def scrape_all_sites():
                                 cur.execute(
                                     'INSERT INTO articles (title, url, site_source, match_keyword, original_time) '
                                     'VALUES (%s, %s, %s, %s, %s) '
-                                    'ON CONFLICT (url) DO NOTHING',
+                                    'ON CONFLICT (url) DO NOTHING RETURNING id',
                                     (title, url, skey, tag, now_beijing.strftime("%H:%M")),
                                 )
-                                if cur.rowcount > 0:
+                                inserted_row = cur.fetchone()
+                                if inserted_row:
+                                    article_id = inserted_row[0]
                                     count += 1
                                     matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
                                     if matched_alert:
                                         inserted_articles.append(
                                             {
+                                                "id": article_id,
+                                                "view_url": build_article_view_url(article_id),
                                                 "title": title,
                                                 "url": url,
                                                 "tag": tag,
