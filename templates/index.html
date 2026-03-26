@@ -236,7 +236,7 @@
     <div class="list-container">
         <div class="refresh-bar">
             <i class="bi bi-clock-history"></i>
-            每 3 分钟自动刷新，下次刷新：<span class="time-highlight">{{ next_refresh_time }}</span>
+            每 2 分钟自动刷新，下次刷新：<span class="time-highlight">{{ next_refresh_time }}</span>
         </div>
 
         {% if articles %}
@@ -277,7 +277,7 @@
             isPageVisible = !document.hidden;
         });
 
-        // 每 180 秒检查一次
+        // 每 120 秒检查一次
         setInterval(function () {
             // 只有当用户正在看页面时，才去服务器检查更新
             if (!isPageVisible) return;
@@ -290,7 +290,7 @@
                     }
                 })
                 .catch(function (err) { console.log("检查更新失败"); });
-        }, 180000); 
+        }, 120000); 
     </script>
 </body>
 
