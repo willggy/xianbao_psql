@@ -976,7 +976,14 @@ def img_proxy():
         
         if r.status_code != 200:
             print(f"[IMG_PROXY] {url} 返回 {r.status_code}")
-            return "", r.status_code
+            return Response(
+                "",
+                status=r.status_code,
+                headers={
+                    "Cache-Control": "no-store, max-age=0",
+                    "Pragma": "no-cache",
+                },
+            )
 
         content_type = r.headers.get("Content-Type", "image/jpeg")
         
@@ -990,15 +997,38 @@ def img_proxy():
 
         # 【优化】使用生成器流式传输数据，不再将整个图片存入内存
         def generate():
-            for chunk in r.iter_content(chunk_size=4096):
-                yield chunk
-        
-        return Response(generate(), content_type=content_type, status=200)
+            try:
+                for chunk in r.iter_content(chunk_size=4096):
+                    yield chunk
+            finally:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+        resp = Response(generate(), content_type=content_type, status=200)
+        resp.headers["Cache-Control"] = "public, max-age=86400, s-maxage=86400, stale-while-revalidate=600"
+        resp.headers["CDN-Cache-Control"] = "public, s-maxage=86400, stale-while-revalidate=600"
+        resp.headers["Vary"] = "Accept-Encoding"
+        upstream_etag = r.headers.get("ETag")
+        if upstream_etag:
+            resp.headers["ETag"] = upstream_etag
+        upstream_last_modified = r.headers.get("Last-Modified")
+        if upstream_last_modified:
+            resp.headers["Last-Modified"] = upstream_last_modified
+        return resp
 
     except Exception as e:
         print(f"[IMG_PROXY ERROR] {url}: {e}")
         transparent_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y1GNnUAAAAASUVORK5CYII=")
-        return Response(transparent_png, content_type="image/png")
+        return Response(
+            transparent_png,
+            content_type="image/png",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -1340,7 +1370,7 @@ def scrape_all_sites():
                                 )
                                 inserted_row = cur.fetchone()
                                 if inserted_row:
-                                    article_id = inserted_row[0]
+                                    article_id = inserted_row["id"]
                                     count += 1
                                     matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
                                     if matched_alert:
