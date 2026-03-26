@@ -60,7 +60,7 @@ SITES_CONFIG = {
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
         "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)",
-        "scrape_interval_min": 2,
+        "scrape_interval_min": 0,
         "max_items_per_run": 80,
         "original_url_selectors": [
             "a[href*='source']",
@@ -124,6 +124,11 @@ ALERT_GROUPS = {
     "中行": ["中行", "中国银行", "中hang"],
 }
 TITLE_SIMILARITY_THRESHOLD = 0.85
+SITE_LOG_NAMES = {
+    "xianbao": "线报库",
+    "iehou": "爱猴线报",
+    "xianbao_icu": "鲸线报",
+}
 
 # 数据库路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -325,6 +330,10 @@ def normalize_image_url(url: str) -> str:
     except Exception:
         return url
     return url
+
+TRUSTED_IMAGE_HOSTS = {
+    "pic.xiaodigu.cn",
+}
 
 def clean_html(html_content, site_key):
     if not html_content:
@@ -909,7 +918,8 @@ def img_proxy():
         return any(_is_ip_private_or_disallowed(ip) for ip in resolved)
 
     host = parsed.hostname or ""
-    if _host_resolves_to_disallowed_ip(host):
+    trusted_host = host.lower() in TRUSTED_IMAGE_HOSTS
+    if not trusted_host and _host_resolves_to_disallowed_ip(host):
         print("[WARN] Blocked SSRF host:", host, "url:", url)
         return "", 404
 
@@ -947,7 +957,8 @@ def img_proxy():
         final_url = getattr(r, "url", "") or url
         final_parsed = urlparse(final_url)
         final_host = final_parsed.hostname or ""
-        if final_parsed.scheme not in ("http", "https") or _host_resolves_to_disallowed_ip(final_host):
+        final_trusted = final_host.lower() in TRUSTED_IMAGE_HOSTS
+        if final_parsed.scheme not in ("http", "https") or (not final_trusted and _host_resolves_to_disallowed_ip(final_host)):
             print("[WARN] Blocked SSRF redirect:", final_url)
             try:
                 r.close()
@@ -963,8 +974,11 @@ def img_proxy():
         
         # 【优化】验证 Content-Type 是否为图片类型
         if not content_type or not any(img_type in content_type.lower() for img_type in ['image/', 'application/octet-stream']):
-            print(f"[WARN] Content-Type 不是图片类型: {content_type}")
-            return "", 404
+            if trusted_host and url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                content_type = "image/jpeg"
+            else:
+                print(f"[WARN] Content-Type 不是图片类型: {content_type}")
+                return "", 404
 
         # 【优化】使用生成器流式传输数据，不再将整个图片存入内存
         def generate():
@@ -1164,11 +1178,26 @@ def send_match_notifications(new_articles):
 
     sent = 0
     for article in new_articles:
-        text = f"线报-{article['alert_keyword']}\n{article['title']}\n{article['url']}"
+        alert_title = f"线报-{article['alert_keyword']}"
+        text = f"{alert_title}\n{article['title']}\n{article['url']}"
 
         if FEISHU_WEBHOOK:
             try:
-                requests.post(FEISHU_WEBHOOK, json={"msg_type": "text", "content": {"text": text}}, timeout=8)
+                feishu_payload = {
+                    "msg_type": "post",
+                    "content": {
+                        "post": {
+                            "zh_cn": {
+                                "title": alert_title,
+                                "content": [
+                                    [{"tag": "text", "text": article["title"]}],
+                                    [{"tag": "a", "text": "查看线报", "href": article["url"]}],
+                                ],
+                            }
+                        }
+                    },
+                }
+                requests.post(FEISHU_WEBHOOK, json=feishu_payload, timeout=8)
                 sent += 1
             except Exception as e:
                 print(f"feishu notify error: {e}")
@@ -1224,7 +1253,7 @@ def scrape_all_sites():
                 else:
                     skipped_sites.append(skey)
                     site_stats[skey] = {"name": cfg.get("name", skey), "new": 0, "status": "skipped"}
-                    log_stats[skey] = "skipped"
+                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = "skipped"
 
             seen_titles_this_run = set()
             recent_articles = conn.execute(
@@ -1253,7 +1282,7 @@ def scrape_all_sites():
                                 "status": "error",
                                 "error": result.get("error", "unknown error"),
                             }
-                            log_stats[skey] = "error"
+                            log_stats[SITE_LOG_NAMES.get(skey, skey)] = "error"
                             update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                             continue
 
@@ -1306,18 +1335,18 @@ def scrape_all_sites():
                                         )
 
                         site_stats[skey] = {"name": cfg.get("name", skey), "new": count, "status": "ok"}
-                        log_stats[skey] = count
+                        log_stats[SITE_LOG_NAMES.get(skey, skey)] = count
                         update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                         print(f"  {skey} new items: {count}")
 
+            notified = send_match_notifications(inserted_articles)
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < (now() - interval '4 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
-                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats}",),
+                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
             )
             conn.commit()
 
-            notified = send_match_notifications(inserted_articles)
             total_new = sum(int(v.get("new", 0)) for v in site_stats.values())
             return {
                 "status": "success",
