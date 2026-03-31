@@ -66,19 +66,52 @@
 
         .article-content pre {
             margin: 16px 0;
-            padding: 14px 16px;
+            padding: 10px 12px;
             background: #f6f8fb;
             border: 1px solid #d8e0ea;
             border-radius: 10px;
             overflow-x: auto;
             white-space: pre-wrap;
             word-break: break-all;
+            display: inline-flex;
+            align-items: flex-start;
+            gap: 10px;
+            max-width: 100%;
+            width: fit-content;
+            min-width: min(100%, 420px);
         }
 
         .article-content code {
             font-family: "Consolas", "Courier New", monospace;
             font-size: 0.96rem;
             color: #1f2937;
+            white-space: pre-wrap;
+        }
+
+        .copy-code-btn {
+            flex: 0 0 auto;
+            border: 1px solid #cfd7e3;
+            background: #e9eef5;
+            color: #526274;
+            border-radius: 7px;
+            padding: 3px 8px;
+            font-size: 0.78rem;
+            line-height: 1.4;
+            cursor: pointer;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .copy-code-btn:hover {
+            background: #e1e8f0;
+            border-color: #bcc8d6;
+            color: #435467;
+        }
+
+        .copy-code-btn:disabled {
+            cursor: default;
+            background: #dde5ee;
+            border-color: #c8d2de;
+            color: #536477;
         }
 
         /* 图片等比例缩小 + 高度上限 */
@@ -205,9 +238,48 @@
             const modal = document.getElementById('imageModal');
             const modalImg = document.getElementById('modalImage');
             const closeBtn = document.querySelector('.close-modal');
+            const articleContent = document.querySelector('.article-content');
+
+            articleContent.querySelectorAll('pre').forEach(function (pre) {
+                if (pre.querySelector('.copy-code-btn')) {
+                    return;
+                }
+
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'copy-code-btn';
+                button.textContent = '复制';
+                button.addEventListener('click', async function () {
+                    if (button.disabled) {
+                        return;
+                    }
+                    const code = pre.querySelector('code');
+                    const text = code ? code.innerText : pre.innerText;
+
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        button.textContent = '已复制';
+                        button.disabled = true;
+                    } catch (error) {
+                        const range = document.createRange();
+                        range.selectNodeContents(code || pre);
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        try {
+                            document.execCommand('copy');
+                            button.textContent = '已复制';
+                            button.disabled = true;
+                        } finally {
+                            selection.removeAllRanges();
+                        }
+                    }
+                });
+                pre.appendChild(button);
+            });
 
             // 监听正文区所有图片点击
-            document.querySelector('.article-content').addEventListener('click', function (e) {
+            articleContent.addEventListener('click', function (e) {
                 if (e.target.tagName === 'IMG') {
                     modal.classList.add('active');
                     modalImg.src = e.target.src;
