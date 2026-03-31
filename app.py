@@ -362,11 +362,12 @@ def clean_html(html_content, site_key):
         if not parent or getattr(parent, "name", "") in {"script", "style", "pre", "code"}:
             continue
         text = str(text_node).strip()
-        if not text.startswith(("#小程序://", "mp://")):
+        token = extract_command_token(text)
+        if not token:
             continue
         pre_tag = soup.new_tag("pre")
         code_tag = soup.new_tag("code")
-        code_tag.string = text
+        code_tag.string = token
         pre_tag.append(code_tag)
         text_node.replace_with(pre_tag)
 
