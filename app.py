@@ -1243,18 +1243,23 @@ def build_preview_text(text, limit=20):
     return cleaned[:limit] + "..."
 
 
-def extract_text_preview(html_content, limit=20):
-    if not html_content:
-        return ""
-    try:
-        soup = BeautifulSoup(html_content, "html.parser")
-        text = soup.get_text(" ", strip=True)
-        return build_preview_text(text, limit=limit)
-    except Exception:
-        return ""
+COMMAND_TOKEN_RE = re.compile(r"(#小程序://\S+|mp://\S+)")
 
 
-def fetch_article_preview(url, site_key, limit=20):
+def extract_command_token(text):
+    if not text:
+        return ""
+    match = COMMAND_TOKEN_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def strip_command_token(text):
+    stripped = COMMAND_TOKEN_RE.sub("", text or "")
+    stripped = re.sub(r"\s+", " ", stripped).strip(" -–—|｜,，;；")
+    return stripped.strip()
+
+
+def fetch_article_command_token(url, site_key):
     if not url or site_key not in SITES_CONFIG:
         return ""
     try:
@@ -1272,7 +1277,7 @@ def fetch_article_preview(url, site_key, limit=20):
         soup.decompose()
         if not parts:
             return ""
-        return build_preview_text(" ".join(parts), limit=limit)
+        return extract_command_token(" ".join(parts))
     except Exception:
         return ""
 
@@ -1285,8 +1290,10 @@ def send_match_notifications(new_articles):
     for article in new_articles:
         alert_title = f"线报-{article['alert_keyword']}"
         notify_url = article.get("view_url") or article["url"]
-        preview_title = build_preview_text(article["title"], limit=20)
-        preview_body = article.get("preview", "")
+        command_token = article.get("command_token", "")
+        cleaned_title = strip_command_token(article["title"])
+        preview_title = build_preview_text(cleaned_title or article["title"], limit=20)
+        preview_body = command_token
         text_parts = [alert_title, preview_title]
         if preview_body:
             text_parts.append(preview_body)
@@ -1446,7 +1453,7 @@ def scrape_all_sites():
                                                 "id": article_id,
                                                 "view_url": build_article_view_url(article_id),
                                                 "title": title,
-                                                "preview": fetch_article_preview(url, skey, limit=20),
+                                                "command_token": extract_command_token(title) or fetch_article_command_token(url, skey),
                                                 "url": url,
                                                 "tag": tag,
                                                 "site_key": skey,
