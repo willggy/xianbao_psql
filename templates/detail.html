@@ -76,12 +76,14 @@
             display: inline-flex;
             align-items: flex-start;
             gap: 10px;
+            justify-content: space-between;
             max-width: 100%;
             width: fit-content;
             min-width: min(100%, 420px);
         }
 
         .article-content code {
+            flex: 1 1 auto;
             font-family: "Consolas", "Courier New", monospace;
             font-size: 0.96rem;
             color: #1f2937;
@@ -90,6 +92,7 @@
 
         .copy-code-btn {
             flex: 0 0 auto;
+            margin-left: auto;
             border: 1px solid #cfd7e3;
             background: #e9eef5;
             color: #526274;
