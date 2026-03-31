@@ -357,6 +357,19 @@ def clean_html(html_content, site_key):
     site_cfg = SITES_CONFIG.get(site_key, {})
     site_domain = site_cfg.get("domain", "")
 
+    for text_node in soup.find_all(string=True):
+        parent = getattr(text_node, "parent", None)
+        if not parent or getattr(parent, "name", "") in {"script", "style", "pre", "code"}:
+            continue
+        text = str(text_node).strip()
+        if not text.startswith(("#小程序://", "mp://")):
+            continue
+        pre_tag = soup.new_tag("pre")
+        code_tag = soup.new_tag("code")
+        code_tag.string = text
+        pre_tag.append(code_tag)
+        text_node.replace_with(pre_tag)
+
     for tag in soup.find_all(True):
 
         # ============================
@@ -412,8 +425,11 @@ def clean_html(html_content, site_key):
             # Keep existing percent-encoding, but encode query separators (&, =)
             # inside nested URLs so outer /img_proxy query string will not truncate.
             src = normalize_image_url(src)
-
-            proxy_url = "/img_proxy?url=" + quote(src, safe=':/?%')
+            src_host = (urlparse(src).hostname or "").lower()
+            if src_host.endswith("pic.xiaodigu.cn"):
+                proxy_url = src
+            else:
+                proxy_url = "/img_proxy?url=" + quote(src, safe=':/?%')
 
             tag.attrs = {
                 'src': proxy_url,
@@ -1218,6 +1234,49 @@ def build_article_view_url(article_id):
     return f"/view?id={article_id}"
 
 
+def build_preview_text(text, limit=20):
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "..."
+
+
+def extract_text_preview(html_content, limit=20):
+    if not html_content:
+        return ""
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = soup.get_text(" ", strip=True)
+        return build_preview_text(text, limit=limit)
+    except Exception:
+        return ""
+
+
+def fetch_article_preview(url, site_key, limit=20):
+    if not url or site_key not in SITES_CONFIG:
+        return ""
+    try:
+        r = session_req.get(url, timeout=10)
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        selectors = SITES_CONFIG[site_key]["content_selector"].split(",")
+        parts = []
+        for sel in selectors:
+            node = soup.select_one(sel.strip())
+            if node:
+                text = node.get_text(" ", strip=True)
+                if text:
+                    parts.append(text)
+        soup.decompose()
+        if not parts:
+            return ""
+        return build_preview_text(" ".join(parts), limit=limit)
+    except Exception:
+        return ""
+
+
 def send_match_notifications(new_articles):
     if not ALERT_ENABLED or not new_articles:
         return 0
@@ -1226,25 +1285,33 @@ def send_match_notifications(new_articles):
     for article in new_articles:
         alert_title = f"线报-{article['alert_keyword']}"
         notify_url = article.get("view_url") or article["url"]
-        text = f"{alert_title}\n{article['title']}\n{notify_url}"
+        preview_title = build_preview_text(article["title"], limit=20)
+        preview_body = article.get("preview", "")
+        text_parts = [alert_title, preview_title]
+        if preview_body:
+            text_parts.append(preview_body)
+        text_parts.append(notify_url)
+        text = "\n".join(text_parts)
 
         if FEISHU_WEBHOOK:
             try:
+                content_rows = [
+                    [{"tag": "text", "text": preview_title}],
+                ]
+                if preview_body:
+                    content_rows.append([{"tag": "text", "text": preview_body}])
+                content_rows.append([{"tag": "a", "text": "查看线报", "href": notify_url}])
                 feishu_payload = {
                     "msg_type": "post",
                     "content": {
                         "post": {
                             "zh_cn": {
                                 "title": alert_title,
-                                "content": [
-                                    [{"tag": "text", "text": article["title"]}],
-                                    [{"tag": "a", "text": "查看线报", "href": article["url"]}],
-                                ],
+                                "content": content_rows,
                             }
                         }
                     },
                 }
-                feishu_payload["content"]["post"]["zh_cn"]["content"][1][0]["href"] = notify_url
                 requests.post(FEISHU_WEBHOOK, json=feishu_payload, timeout=8)
                 sent += 1
             except Exception as e:
@@ -1379,6 +1446,7 @@ def scrape_all_sites():
                                                 "id": article_id,
                                                 "view_url": build_article_view_url(article_id),
                                                 "title": title,
+                                                "preview": fetch_article_preview(url, skey, limit=20),
                                                 "url": url,
                                                 "tag": tag,
                                                 "site_key": skey,
