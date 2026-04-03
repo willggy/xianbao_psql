@@ -23,6 +23,15 @@
             padding-bottom: 30px;
         }
 
+        body {
+            --featured-pill-bg: #f7e4bf;
+            --featured-pill-text: #704315;
+            --featured-pill-border: #dfaa54;
+            --featured-pill-active-bg: #f1d39a;
+            --featured-pill-active-text: #63370b;
+            --featured-pill-active-border: #cf8f2f;
+        }
+
         .app-header {
             position: sticky;
             top: 0;
@@ -67,6 +76,18 @@
         .nav-pill.active {
             background: var(--ios-blue);
             color: white !important;
+        }
+
+        .nav-pill-featured {
+            background: var(--featured-pill-bg, #f2e6ca);
+            color: var(--featured-pill-text, #5f4314);
+            border: 1px solid var(--featured-pill-border, #d4b067);
+        }
+
+        .nav-pill-featured.active {
+            background: var(--featured-pill-active-bg, #e8d8b1);
+            color: var(--featured-pill-active-text, #543a10) !important;
+            border-color: var(--featured-pill-active-border, #c9a24f);
         }
 
         .dropdown-menu {
@@ -183,6 +204,24 @@
             font-weight: bold;
         }
 
+        .badge-featured {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            line-height: 1;
+            margin-right: 6px;
+            padding: 3px 6px;
+            border-radius: 999px;
+            vertical-align: 1px;
+            color: var(--featured-pill-text, #5f4314);
+            background: var(--featured-pill-bg, #f2e6ca);
+            border: 1px solid var(--featured-pill-border, #d4b067);
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+
+
         .item-time {
             font-size: 12px;
             color: var(--text-sub);
@@ -214,7 +253,7 @@
                     </ul>
                 </div>
 
-                <a href="/?tag=羊毛精选" class="nav-pill {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
+                <a href="/?tag=羊毛精选" class="nav-pill nav-pill-featured {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
 
                 <button class="nav-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchCollapse">
                     <i class="bi bi-search"></i>
@@ -244,9 +283,18 @@
         <a href="/view?id={{ article.id }}" class="list-item" target="_blank">
             <div class="item-title">
                 {% if article.is_top %}<span class="badge-top">置顶</span>{% endif %}
+                {% if article.is_featured and current_tag != '羊毛精选' %}<span class="badge-featured">精选</span>{% endif %}
                 {{ article.title }}
             </div>
-            <div class="item-time">{{ article.original_time }}</div>
+            <div class="item-time">
+                {% if article.original_time %}
+                    {% if article.original_time.startswith(today_str) %}
+                        {{ article.original_time.split(' ')[1] if ' ' in article.original_time else article.original_time }}
+                    {% else %}
+                        {{ article.original_time[5:] }}
+                    {% endif %}
+                {% endif %}
+            </div>
         </a>
         {% endfor %}
         {% else %}
@@ -270,7 +318,6 @@
     <script>
         // 获取初始 ID (转换为数字)
         var latestId = parseInt(document.getElementById('latestArticleId').dataset.id) || 0;
-
         // 页面可见性检测
         var isPageVisible = true;
         document.addEventListener("visibilitychange", function () {

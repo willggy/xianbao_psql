@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>精选管理</title>
+    <link href="https://lib.baomitu.com/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://lib.baomitu.com/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #f3f4f6;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding-bottom: 40px;
+        }
+
+        .page-header {
+            background: #fff;
+            border-bottom: 1px solid #e5e7eb;
+            padding: 15px 0;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            border: none;
+            border-radius: 14px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 999px;
+            text-decoration: none;
+            color: #374151;
+            background: #f3f4f6;
+            font-size: 14px;
+        }
+
+        .chip.active {
+            background: #111827;
+            color: #fff;
+        }
+
+        .title-link {
+            color: #111827;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .title-link:hover {
+            color: #0d6efd;
+        }
+
+        .badge-featured {
+            background: #fff0cc;
+            color: #9a6700;
+            border: 1px solid #f6d68a;
+        }
+
+        .badge-normal {
+            background: #f3f4f6;
+            color: #6b7280;
+            border: 1px solid #e5e7eb;
+        }
+    </style>
+</head>
+
+<body>
+    <header class="page-header">
+        <div class="container d-flex justify-content-between align-items-center gap-2 flex-wrap">
+            <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-stars text-warning fs-4"></i>
+                <h4 class="mb-0 fw-bold">精选管理</h4>
+            </div>
+            <div class="d-flex gap-2">
+                <a href="/admin" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> 返回控制台</a>
+                <a href="/" target="_blank" class="btn btn-outline-primary btn-sm"><i class="bi bi-house"></i> 查看首页</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="card mb-4">
+            <div class="card-body">
+                <form method="get" action="{{ url_for('admin_featured') }}" class="row g-3 align-items-center">
+                    <div class="col-12">
+                        <div class="toolbar">
+                            <a href="{{ url_for('admin_featured', status='all', bank=current_bank, q=q) }}" class="chip {{ 'active' if current_status == 'all' else '' }}">全部</a>
+                            <a href="{{ url_for('admin_featured', status='featured', bank=current_bank, q=q) }}" class="chip {{ 'active' if current_status == 'featured' else '' }}">已精选</a>
+                            <a href="{{ url_for('admin_featured', status='normal', bank=current_bank, q=q) }}" class="chip {{ 'active' if current_status == 'normal' else '' }}">未精选</a>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <select name="bank" class="form-select">
+                            <option value="">全部银行</option>
+                            {% for bank in bank_list %}
+                            <option value="{{ bank }}" {{ 'selected' if current_bank == bank else '' }}>{{ bank }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <input type="text" name="q" class="form-control" placeholder="按标题搜索..." value="{{ q }}">
+                    </div>
+                    <div class="col-md-2">
+                        <input type="hidden" name="status" value="{{ current_status }}">
+                        <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search"></i> 筛选</button>
+                    </div>
+                    <div class="col-md-2">
+                        <a href="{{ url_for('admin_featured') }}" class="btn btn-outline-secondary w-100">重置</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <span class="fw-bold"><i class="bi bi-list-ul me-2"></i>抓取线报</span>
+                <span class="text-muted small">只显示抓取内容，不含手工发布</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0 align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>标题</th>
+                            <th>分类</th>
+                            <th>状态</th>
+                            <th>时间</th>
+                            <th class="text-end">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for art in articles %}
+                        <tr>
+                            <td>
+                                <a href="/view?id={{ art['id'] }}" target="_blank" class="title-link">{{ art['title'] }}</a>
+                            </td>
+                            <td>
+                                <span class="badge text-bg-light border">{{ art['match_keyword'] or '未分类' }}</span>
+                            </td>
+                            <td>
+                                {% if art['is_featured'] %}
+                                <span class="badge badge-featured"><i class="bi bi-stars me-1"></i>已精选</span>
+                                {% else %}
+                                <span class="badge badge-normal">普通</span>
+                                {% endif %}
+                                {% if art['is_top'] %}
+                                <span class="badge text-bg-danger ms-1">置顶</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-muted small">{{ art['original_time'] or '-' }}</td>
+                            <td class="text-end">
+                                <a href="{{ url_for('toggle_featured', aid=art['id'], next=request.full_path) }}" class="btn btn-sm {{ 'btn-outline-secondary' if art['is_featured'] else 'btn-warning' }}">
+                                    <i class="bi {{ 'bi-bookmark-x' if art['is_featured'] else 'bi-stars' }}"></i>
+                                    {{ '取消收藏' if art['is_featured'] else '收藏' }}
+                                </a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="text-center py-5 text-muted">没有符合条件的抓取线报</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://lib.baomitu.com/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>
