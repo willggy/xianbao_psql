@@ -234,6 +234,20 @@ def get_db_connection():
     if not dsn:
         raise RuntimeError("DATABASE_URL not set. Configure env var DATABASE_URL before start.")
     return psycopg.connect(dsn, row_factory=dict_row)
+
+
+def ensure_article_feature_columns(conn):
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS is_featured INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS featured_at TIMESTAMP")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS featured_notified INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS token_only_signature TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_bank_top ON articles(match_keyword, is_top, id DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_featured ON articles(is_featured, id DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_cleanup ON articles(site_source, is_featured, updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_token_only_signature ON articles(token_only_signature)")
+    conn.commit()
+
+
 def make_links_clickable(text):
     # 匹配 http/https URL，但排除已经在 href= 里的情况
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
@@ -362,12 +376,12 @@ def clean_html(html_content, site_key):
         if not parent or getattr(parent, "name", "") in {"script", "style", "pre", "code"}:
             continue
         text = str(text_node).strip()
-        token = extract_command_token(text)
-        if not token:
+        tokens = extract_command_tokens(text)
+        if not tokens:
             continue
         pre_tag = soup.new_tag("pre")
         code_tag = soup.new_tag("code")
-        code_tag.string = token
+        code_tag.string = "\n".join(tokens)
         pre_tag.append(code_tag)
         text_node.replace_with(pre_tag)
 
@@ -523,11 +537,15 @@ def index():
     page = request.args.get('page', 1, type=int)
     
     conn = get_db_connection()
+    ensure_article_feature_columns(conn)
     where = "WHERE 1=1"
     params = []
     if tag:
-        where += " AND match_keyword = %s"
-        params.append(tag)
+        if tag == '羊毛精选':
+            where += " AND is_featured = 1"
+        else:
+            where += " AND match_keyword = %s"
+            params.append(tag)
     if q:
         where += " AND title LIKE %s"
         params.append(f"%{q}%")
@@ -548,7 +566,8 @@ def index():
                            q=q, 
                            current_page=page, 
                            total_pages=(total+PER_PAGE-1)//PER_PAGE,
-                           latest_id=articles[0]['id'] if articles else 0)
+                           latest_id=articles[0]['id'] if articles else 0,
+                           today_str=now.strftime("%Y-%m-%d"))
 
 @app.route("/view")
 def view():
@@ -644,6 +663,7 @@ def view():
 @login_required
 def admin_panel():
     conn = get_db_connection()
+    ensure_article_feature_columns(conn)
     # 1. 先初始化所有变量，防止 UnboundLocalError
     whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
@@ -679,6 +699,50 @@ def admin_panel():
         'last_update': last_update
     }
     return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, alertlist=alertlist, my_articles=my_articles, stats=stats)
+
+
+@app.route('/admin/featured')
+@login_required
+def admin_featured():
+    conn = get_db_connection()
+    ensure_article_feature_columns(conn)
+
+    status = request.args.get('status', 'all').strip() or 'all'
+    bank = request.args.get('bank', '').strip()
+    q = request.args.get('q', '').strip()
+
+    where = ["site_source != 'user'"]
+    params = []
+
+    if status == 'featured':
+        where.append("is_featured = 1")
+    elif status == 'normal':
+        where.append("is_featured = 0")
+
+    if bank:
+        where.append("match_keyword = %s")
+        params.append(bank)
+
+    if q:
+        where.append("title LIKE %s")
+        params.append(f"%{q}%")
+
+    featured_articles = conn.execute(
+        "SELECT id, title, match_keyword, original_time, updated_at, is_top, is_featured, featured_at "
+        f"FROM articles WHERE {' AND '.join(where)} "
+        "ORDER BY is_featured DESC, COALESCE(featured_at, updated_at) DESC, id DESC LIMIT 300",
+        params,
+    ).fetchall()
+    conn.close()
+
+    return render_template(
+        'admin_featured.html',
+        articles=featured_articles,
+        bank_list=list(BANK_KEYWORDS.keys()),
+        current_status=status,
+        current_bank=bank,
+        q=q,
+    )
 @app.route('/admin/refresh', methods=['GET', 'POST'])
 @login_required  # manual refresh requires login
 def admin_refresh():
@@ -776,6 +840,40 @@ def toggle_top(aid):
     conn.execute("UPDATE articles SET is_top = 1 - is_top WHERE id=%s", (aid,))
     conn.commit(); conn.close()
     return redirect('/admin')
+
+
+@app.route('/article/feature/<int:aid>')
+@login_required
+def toggle_featured(aid):
+    conn = get_db_connection()
+    ensure_article_feature_columns(conn)
+    row = conn.execute("SELECT id, title, url, site_source, match_keyword, is_featured, featured_notified FROM articles WHERE id=%s", (aid,)).fetchone()
+    if not row:
+        conn.close()
+        return redirect(url_for('admin_featured'))
+
+    is_now_featured = row['is_featured'] == 0
+
+    conn.execute(
+        "UPDATE articles SET is_featured = 1 - is_featured, featured_at = CASE WHEN is_featured = 0 THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=%s",
+        (aid,),
+    )
+
+    if is_now_featured and not row['featured_notified'] and row['site_source'] != 'user':
+        try:
+            notify_url = build_article_view_url(row['id']) or row['url']
+            cleaned_title = strip_command_token(row['title'])
+            preview_title = build_preview_text(cleaned_title, limit=20)
+            command_token = "\n".join(extract_command_tokens(row['title'])) or fetch_article_command_token(row['url'], row['site_source'])
+            _send_one_notification("线报-精选", notify_url, preview_title, command_token)
+            conn.execute("UPDATE articles SET featured_notified = 1 WHERE id=%s", (aid,))
+        except Exception as e:
+            print(f"featured notify error: {e}")
+
+    conn.commit()
+    conn.close()
+    next_url = request.args.get('next') or url_for('admin_featured')
+    return redirect(next_url)
 
 @app.route('/article/delete/<int:aid>')
 @login_required
@@ -1116,6 +1214,7 @@ def is_similar_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THRESHO
     return False
 
 def ensure_runtime_tables(conn):
+    ensure_article_feature_columns(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scrape_state (
@@ -1254,6 +1353,22 @@ def extract_command_token(text):
     return match.group(1) if match else ""
 
 
+def extract_command_tokens(text):
+    if not text:
+        return []
+    return COMMAND_TOKEN_RE.findall(text)
+
+
+def get_token_only_signature(text):
+    tokens = extract_command_tokens(text)
+    if not tokens:
+        return ""
+    stripped = strip_command_token(text)
+    if stripped:
+        return ""
+    return "\n".join(tokens)
+
+
 def strip_command_token(text):
     stripped = COMMAND_TOKEN_RE.sub("", text or "")
     stripped = re.sub(r"\s+", " ", stripped).strip(" -–—|｜,，;；")
@@ -1278,9 +1393,70 @@ def fetch_article_command_token(url, site_key):
         soup.decompose()
         if not parts:
             return ""
-        return extract_command_token(" ".join(parts))
+        return "\n".join(extract_command_tokens(" ".join(parts)))
     except Exception:
         return ""
+
+
+def fetch_article_token_only_signature(url, site_key):
+    if not url or site_key not in SITES_CONFIG:
+        return ""
+    try:
+        r = session_req.get(url, timeout=10)
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        selectors = SITES_CONFIG[site_key]["content_selector"].split(",")
+        parts = []
+        for sel in selectors:
+            node = soup.select_one(sel.strip())
+            if node:
+                text = node.get_text(" ", strip=True)
+                if text:
+                    parts.append(text)
+        soup.decompose()
+        if not parts:
+            return ""
+        return get_token_only_signature(" ".join(parts))
+    except Exception:
+        return ""
+
+
+def _send_one_notification(notify_title, notify_url, preview_title, preview_body):
+    if not ALERT_ENABLED:
+        return
+    text_parts = [notify_title, preview_title]
+    if preview_body:
+        text_parts.append(preview_body)
+    text_parts.append(notify_url)
+    text = "\n".join(text_parts)
+
+    if FEISHU_WEBHOOK:
+        try:
+            content_rows = [
+                [{"tag": "text", "text": preview_title}],
+            ]
+            if preview_body:
+                content_rows.append([{"tag": "text", "text": preview_body}])
+            content_rows.append([{"tag": "a", "text": "查看线报", "href": notify_url}])
+            requests.post(FEISHU_WEBHOOK, json={
+                "msg_type": "post",
+                "content": {
+                    "post": {
+                        "zh_cn": {
+                            "title": notify_title,
+                            "content": content_rows,
+                        }
+                    }
+                },
+            }, timeout=8)
+        except Exception as e:
+            print(f"feishu notify error: {e}")
+
+    if WECHAT_WEBHOOK:
+        try:
+            requests.post(WECHAT_WEBHOOK, json={"msgtype": "text", "text": {"content": text}}, timeout=8)
+        except Exception as e:
+            print(f"wechat notify error: {e}")
 
 
 def send_match_notifications(new_articles):
@@ -1289,48 +1465,13 @@ def send_match_notifications(new_articles):
 
     sent = 0
     for article in new_articles:
-        alert_title = f"线报-{article['alert_keyword']}"
+        notify_title = f"线报-{article['alert_keyword']}"
         notify_url = article.get("view_url") or article["url"]
         command_token = article.get("command_token", "")
         cleaned_title = strip_command_token(article["title"])
         preview_title = build_preview_text(cleaned_title or article["title"], limit=20)
-        preview_body = command_token
-        text_parts = [alert_title, preview_title]
-        if preview_body:
-            text_parts.append(preview_body)
-        text_parts.append(notify_url)
-        text = "\n".join(text_parts)
-
-        if FEISHU_WEBHOOK:
-            try:
-                content_rows = [
-                    [{"tag": "text", "text": preview_title}],
-                ]
-                if preview_body:
-                    content_rows.append([{"tag": "text", "text": preview_body}])
-                content_rows.append([{"tag": "a", "text": "查看线报", "href": notify_url}])
-                feishu_payload = {
-                    "msg_type": "post",
-                    "content": {
-                        "post": {
-                            "zh_cn": {
-                                "title": alert_title,
-                                "content": content_rows,
-                            }
-                        }
-                    },
-                }
-                requests.post(FEISHU_WEBHOOK, json=feishu_payload, timeout=8)
-                sent += 1
-            except Exception as e:
-                print(f"feishu notify error: {e}")
-
-        if WECHAT_WEBHOOK:
-            try:
-                requests.post(WECHAT_WEBHOOK, json={"msgtype": "text", "text": {"content": text}}, timeout=8)
-                sent += 1
-            except Exception as e:
-                print(f"wechat notify error: {e}")
+        _send_one_notification(notify_title, notify_url, preview_title, command_token)
+        sent += 1
 
     return sent
 
@@ -1379,10 +1520,18 @@ def scrape_all_sites():
                     log_stats[SITE_LOG_NAMES.get(skey, skey)] = "skipped"
 
             seen_titles_this_run = set()
+            seen_token_hashes = set()
             recent_articles = conn.execute(
-                "SELECT title FROM articles WHERE updated_at > (now() - interval '30 minutes')"
+                "SELECT title, token_only_signature FROM articles WHERE updated_at > (now() - interval '30 minutes')"
             ).fetchall()
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
+            for row in recent_articles:
+                if row.get('token_only_signature'):
+                    seen_token_hashes.add(row['token_only_signature'])
+                    continue
+                token_signature = get_token_only_signature(row['title'])
+                if token_signature:
+                    seen_token_hashes.add(token_signature)
             inserted_articles = []
 
             if due_sites:
@@ -1420,6 +1569,13 @@ def scrape_all_sites():
                                 continue
                             if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
                                 continue
+                            token_signature = get_token_only_signature(title)
+                            if not token_signature:
+                                token_signature = fetch_article_token_only_signature(url, skey)
+                            if token_signature:
+                                if token_signature in seen_token_hashes:
+                                    continue
+                                seen_token_hashes.add(token_signature)
                             if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                                 continue
                             if any(b in url for b in url_black) or any(b in title for b in title_black):
@@ -1438,10 +1594,10 @@ def scrape_all_sites():
 
                             with conn.cursor() as cur:
                                 cur.execute(
-                                    'INSERT INTO articles (title, url, site_source, match_keyword, original_time) '
-                                    'VALUES (%s, %s, %s, %s, %s) '
+                                    'INSERT INTO articles (title, url, site_source, match_keyword, original_time, token_only_signature) '
+                                    'VALUES (%s, %s, %s, %s, %s, %s) '
                                     'ON CONFLICT (url) DO NOTHING RETURNING id',
-                                    (title, url, skey, tag, now_beijing.strftime("%H:%M")),
+                                    (title, url, skey, tag, now_beijing.strftime("%Y-%m-%d %H:%M"), token_signature or None),
                                 )
                                 inserted_row = cur.fetchone()
                                 if inserted_row:
@@ -1454,7 +1610,7 @@ def scrape_all_sites():
                                                 "id": article_id,
                                                 "view_url": build_article_view_url(article_id),
                                                 "title": title,
-                                                "command_token": extract_command_token(title) or fetch_article_command_token(url, skey),
+                                                "command_token": "\n".join(extract_command_tokens(title)) or fetch_article_command_token(url, skey),
                                                 "url": url,
                                                 "tag": tag,
                                                 "site_key": skey,
@@ -1468,7 +1624,7 @@ def scrape_all_sites():
                         print(f"  {skey} new items: {count}")
 
             notified = send_match_notifications(inserted_articles)
-            conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < (now() - interval '4 days')")
+            conn.execute("DELETE FROM articles WHERE site_source != 'user' AND COALESCE(is_featured, 0) = 0 AND updated_at < (now() - interval '7 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
                 (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
