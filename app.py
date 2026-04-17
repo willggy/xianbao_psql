@@ -49,6 +49,7 @@ CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
 WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "").strip()
 ALERT_ENABLED = os.environ.get("ALERT_ENABLED", "0").strip() == "1"
+DETAIL_SIGNATURE_FETCH_ENABLED = os.environ.get("DETAIL_SIGNATURE_FETCH_ENABLED", "0").strip() == "1"
 PUBLIC_BASE_URL = (
     os.environ.get("PUBLIC_BASE_URL", "").strip()
     or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
@@ -64,8 +65,8 @@ SITES_CONFIG = {
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
         "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)",
-        "scrape_interval_min": 0,
-        "max_items_per_run": 80,
+        "scrape_interval_min": 2,
+        "max_items_per_run": 40,
         "original_url_selectors": [
             "a[href*='source']",
             "a[href*='from']",
@@ -1429,7 +1430,7 @@ def fetch_article_token_only_signature(url, site_key):
     if not url or site_key not in SITES_CONFIG:
         return ""
     try:
-        r = session_req.get(url, timeout=10)
+        r = session_req.get(url, timeout=4)
         r.encoding = "utf-8"
         soup = BeautifulSoup(r.text, "html.parser")
         selectors = SITES_CONFIG[site_key]["content_selector"].split(",")
@@ -1589,7 +1590,7 @@ def scrape_all_sites():
                         if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
                             continue
                         token_signature = get_token_only_signature(title)
-                        if not token_signature:
+                        if not token_signature and DETAIL_SIGNATURE_FETCH_ENABLED:
                             token_signature = fetch_article_token_only_signature(url, skey)
                         if token_signature:
                             if token_signature in seen_token_hashes:
