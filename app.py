@@ -1535,99 +1535,104 @@ def scrape_all_sites():
             inserted_articles = []
 
             if due_sites:
-                max_workers = min(len(due_sites), 3)
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(fetch_site_candidates, skey, cfg, last_seen_url): (skey, cfg)
-                        for skey, cfg, last_seen_url in due_sites
-                    }
-
-                    for future in as_completed(futures):
-                        skey, cfg = futures[future]
-                        result = future.result()
+                for skey, cfg, last_seen_url in due_sites:
+                    result = fetch_site_candidates(skey, cfg, last_seen_url)
                         count = 0
 
-                        if result.get("status") != "ok":
-                            site_stats[skey] = {
-                                "name": cfg.get("name", skey),
-                                "new": 0,
-                                "status": "error",
-                                "error": result.get("error", "unknown error"),
-                            }
-                            log_stats[SITE_LOG_NAMES.get(skey, skey)] = "error"
-                            update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
+                    if result.get("status") != "ok":
+                        site_stats[skey] = {
+                            "name": cfg.get("name", skey),
+                            "new": 0,
+                            "status": "error",
+                            "error": result.get("error", "unknown error"),
+                        }
+                        log_stats[SITE_LOG_NAMES.get(skey, skey)] = "error"
+                        update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
+                        continue
+
+                    for item in result["candidates"]:
+                        title = item["title"]
+                        url = item["url"]
+                        lower_t = title.lower()
+                        lower_url = url.lower()
+                        norm_title = normalize_title(title)
+
+                        if not norm_title:
+                            continue
+                        if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
+                            continue
+                        token_signature = get_token_only_signature(title)
+                        if not token_signature:
+                            token_signature = fetch_article_token_only_signature(url, skey)
+                        if token_signature:
+                            if token_signature in seen_token_hashes:
+                                continue
+                            seen_token_hashes.add(token_signature)
+                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
+                            continue
+                        if any(b in url for b in url_black) or any(b in title for b in title_black):
                             continue
 
-                        for item in result["candidates"]:
-                            title = item["title"]
-                            url = item["url"]
-                            lower_t = title.lower()
-                            lower_url = url.lower()
-                            norm_title = normalize_title(title)
+                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
+                        if not kw:
+                            continue
 
-                            if not norm_title:
-                                continue
-                            if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
-                                continue
-                            token_signature = get_token_only_signature(title)
-                            if not token_signature:
-                                token_signature = fetch_article_token_only_signature(url, skey)
-                            if token_signature:
-                                if token_signature in seen_token_hashes:
-                                    continue
-                                seen_token_hashes.add(token_signature)
-                            if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
-                                continue
-                            if any(b in url for b in url_black) or any(b in title for b in title_black):
-                                continue
+                        seen_titles_this_run.add(norm_title)
+                        tag = kw
+                        for b_name, b_v in BANK_KEYWORDS.items():
+                            if kw in b_v:
+                                tag = b_name
+                                break
 
-                            kw = next((k for k in base_keywords if k.lower() in lower_t), None)
-                            if not kw:
-                                continue
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                'INSERT INTO articles (title, url, site_source, match_keyword, original_time, token_only_signature) '
+                                'VALUES (%s, %s, %s, %s, %s, %s) '
+                                'ON CONFLICT (url) DO NOTHING RETURNING id',
+                                (title, url, skey, tag, now_beijing.strftime("%Y-%m-%d %H:%M"), token_signature or None),
+                            )
+                            inserted_row = cur.fetchone()
+                            if inserted_row:
+                                article_id = inserted_row["id"]
+                                count += 1
+                                matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
+                                if matched_alert:
+                                    inserted_articles.append(
+                                        {
+                                            "id": article_id,
+                                            "view_url": build_article_view_url(article_id),
+                                            "title": title,
+                                            "command_token": "\n".join(extract_command_tokens(title)) or fetch_article_command_token(url, skey),
+                                            "url": url,
+                                            "tag": tag,
+                                            "site_key": skey,
+                                            "alert_keyword": matched_alert,
+                                        }
+                                    )
 
-                            seen_titles_this_run.add(norm_title)
-                            tag = kw
-                            for b_name, b_v in BANK_KEYWORDS.items():
-                                if kw in b_v:
-                                    tag = b_name
-                                    break
-
-                            with conn.cursor() as cur:
-                                cur.execute(
-                                    'INSERT INTO articles (title, url, site_source, match_keyword, original_time, token_only_signature) '
-                                    'VALUES (%s, %s, %s, %s, %s, %s) '
-                                    'ON CONFLICT (url) DO NOTHING RETURNING id',
-                                    (title, url, skey, tag, now_beijing.strftime("%Y-%m-%d %H:%M"), token_signature or None),
-                                )
-                                inserted_row = cur.fetchone()
-                                if inserted_row:
-                                    article_id = inserted_row["id"]
-                                    count += 1
-                                    matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
-                                    if matched_alert:
-                                        inserted_articles.append(
-                                            {
-                                                "id": article_id,
-                                                "view_url": build_article_view_url(article_id),
-                                                "title": title,
-                                                "command_token": "\n".join(extract_command_tokens(title)) or fetch_article_command_token(url, skey),
-                                                "url": url,
-                                                "tag": tag,
-                                                "site_key": skey,
-                                                "alert_keyword": matched_alert,
-                                            }
-                                        )
-
-                        site_stats[skey] = {"name": cfg.get("name", skey), "new": count, "status": "ok"}
-                        log_stats[SITE_LOG_NAMES.get(skey, skey)] = count
-                        update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
-                        print(f"  {skey} new items: {count}")
+                    site_stats[skey] = {"name": cfg.get("name", skey), "new": count, "status": "ok"}
+                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = count
+                    update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
+                    print(f"  {skey} new items: {count}")
 
             notified = send_match_notifications(inserted_articles)
+            conn.execute(
+                "DELETE FROM article_content ac WHERE EXISTS ("
+                "SELECT 1 FROM articles a WHERE a.url = ac.url "
+                "AND a.site_source != 'user' "
+                "AND COALESCE(a.is_featured, 0) = 0 "
+                "AND a.updated_at < (now() - interval '7 days')"
+                ")"
+            )
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND COALESCE(is_featured, 0) = 0 AND updated_at < (now() - interval '7 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
                 (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
+            )
+            conn.execute(
+                'DELETE FROM scrape_log WHERE id NOT IN ('
+                'SELECT id FROM scrape_log ORDER BY id DESC LIMIT 1000'
+                ')'
             )
             conn.commit()
 
