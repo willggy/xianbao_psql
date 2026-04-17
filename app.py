@@ -1225,6 +1225,15 @@ def ensure_runtime_tables(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scrape_log (
+            id BIGSERIAL PRIMARY KEY,
+            last_scrape TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.commit()
 
 def load_scrape_state(conn):
@@ -1615,6 +1624,8 @@ def scrape_all_sites():
                     update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                     print(f"  {skey} new items: {count}")
 
+            # Commit freshly inserted articles before non-critical side effects.
+            conn.commit()
             notified = send_match_notifications(inserted_articles)
             conn.execute(
                 "DELETE FROM article_content ac WHERE EXISTS ("
@@ -1647,6 +1658,11 @@ def scrape_all_sites():
             }
 
         except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             print(f"Scrape Loop Error: {e}")
             return {
                 "status": "error",
