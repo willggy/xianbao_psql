@@ -1537,7 +1537,7 @@ def scrape_all_sites():
             if due_sites:
                 for skey, cfg, last_seen_url in due_sites:
                     result = fetch_site_candidates(skey, cfg, last_seen_url)
-                        count = 0
+                    count = 0
 
                     if result.get("status") != "ok":
                         site_stats[skey] = {
