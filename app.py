@@ -552,7 +552,7 @@ def index():
         params.append(f"%{q}%")
     
     articles = conn.execute(
-        f'SELECT * FROM articles {where} ORDER BY is_top DESC, id DESC LIMIT %s OFFSET %s',
+        f'SELECT * FROM articles {where} ORDER BY is_top DESC, updated_at DESC, id DESC LIMIT %s OFFSET %s',
         params + [PER_PAGE, (page-1)*PER_PAGE],
     ).fetchall()
     
@@ -944,7 +944,7 @@ def sync_bank_alerts():
 @login_required
 def show_logs():
     conn = get_db_connection()
-    logs = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY id DESC LIMIT 50').fetchall()
+    logs = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY created_at DESC, id DESC LIMIT 50').fetchall()
     visitors = conn.execute('SELECT * FROM visit_stats ORDER BY last_visit DESC LIMIT 30').fetchall()
     conn.close()
     return render_template('logs.html', logs=logs, visitors=visitors)
@@ -1261,6 +1261,12 @@ def update_scrape_state(conn, site_key, last_seen_url, run_at):
         (site_key, run_at, last_seen_url),
     )
 
+
+def get_rotating_site(now_beijing):
+    rotating_sites = ("iehou", "xianbao_icu")
+    slot = (now_beijing.hour * 60 + now_beijing.minute) // 2
+    return rotating_sites[slot % len(rotating_sites)]
+
 def match_alert_group(title_lower, url, title_alert, url_alert):
     matched_title = next((k for k in title_alert if k.lower() in title_lower), None)
     matched_url = next((k for k in url_alert if k in url), None)
@@ -1537,10 +1543,15 @@ def scrape_all_sites():
             due_sites = []
             skipped_sites = []
             log_stats = {}
+            rotating_site = get_rotating_site(now_beijing)
 
             for skey, cfg in SITES_CONFIG.items():
                 state_row = state_map.get(skey)
-                if is_site_due(cfg, state_row, now_beijing):
+                if skey in {"iehou", "xianbao_icu"} and skey != rotating_site:
+                    skipped_sites.append(skey)
+                    site_stats[skey] = {"name": cfg.get("name", skey), "new": 0, "status": "rotation_skipped"}
+                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = "rotation_skipped"
+                elif is_site_due(cfg, state_row, now_beijing):
                     due_sites.append((skey, cfg, (state_row or {}).get("last_seen_url") or ""))
                 else:
                     skipped_sites.append(skey)
@@ -1563,8 +1574,37 @@ def scrape_all_sites():
             inserted_articles = []
 
             if due_sites:
+                site_results = {}
+                with ThreadPoolExecutor(max_workers=len(due_sites)) as executor:
+                    future_map = {
+                        executor.submit(fetch_site_candidates, skey, cfg, last_seen_url): (skey, cfg, last_seen_url)
+                        for skey, cfg, last_seen_url in due_sites
+                    }
+                    for future in as_completed(future_map):
+                        skey, cfg, last_seen_url = future_map[future]
+                        try:
+                            site_results[skey] = future.result()
+                        except Exception as e:
+                            site_results[skey] = {
+                                "site_key": skey,
+                                "site_name": cfg.get("name", skey),
+                                "candidates": [],
+                                "last_seen_url": last_seen_url or "",
+                                "matched_items": 0,
+                                "status": "error",
+                                "error": str(e),
+                            }
+
                 for skey, cfg, last_seen_url in due_sites:
-                    result = fetch_site_candidates(skey, cfg, last_seen_url)
+                    result = site_results.get(skey) or {
+                        "site_key": skey,
+                        "site_name": cfg.get("name", skey),
+                        "candidates": [],
+                        "last_seen_url": last_seen_url or "",
+                        "matched_items": 0,
+                        "status": "error",
+                        "error": "missing site result",
+                    }
                     count = 0
 
                     if result.get("status") != "ok":
