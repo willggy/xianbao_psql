@@ -1291,7 +1291,25 @@ def fetch_site_candidates(skey, cfg, last_seen_url):
         r.raise_for_status()
 
         soup = BeautifulSoup(r.text, "lxml")
-        items = soup.select(cfg["list_selector"])
+        if skey == "xianbao_icu":
+            # Avoid heavyweight CSS selectors on xianbao_icu. The page can be
+            # large enough that nth-child descendant selectors trigger long
+            # SoupSieve walks and get the worker killed by the platform.
+            items = []
+            seen_urls = set()
+            for a in soup.find_all("a", href=True):
+                href = (a.get("href") or "").strip()
+                if not href:
+                    continue
+                if "/xianbao/detail" not in href and "/detail" not in href:
+                    continue
+                url = href if href.startswith("http") else (cfg["domain"] + (href if href.startswith("/") else "/" + href))
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                items.append(a)
+        else:
+            items = soup.select(cfg["list_selector"])
         result["matched_items"] = len(items)
         print(f"  matched items: {len(items)}")
 
