@@ -304,11 +304,15 @@
 
     {% if total_pages > 1 %}
     <div class="d-flex justify-content-center gap-3 py-4">
+        {% if current_page > 1 %}
         <a href="/?page={{ current_page - 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}"
-            class="nav-pill {{ 'disabled' if current_page == 1 else '' }}">上一页</a>
+            class="nav-pill">上一页</a>
+        {% endif %}
         <span class="small text-muted align-self-center">{{ current_page }} / {{ total_pages }}</span>
+        {% if current_page < total_pages %}
         <a href="/?page={{ current_page + 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}"
-            class="nav-pill {{ 'disabled' if current_page == total_pages else '' }}">下一页</a>
+            class="nav-pill">下一页</a>
+        {% endif %}
     </div>
     {% endif %}
 
