@@ -508,8 +508,45 @@ def record_visit():
         conn.commit(); conn.close()
     except: pass
 
-def upload_to_img_cdn(img_data):
-    return f"data:image/png;base64,{base64.b64encode(img_data).decode()}"
+def upload_to_img_cdn(img_data, image_ext="png"):
+    image_ext = (image_ext or "png").strip().lower()
+    if image_ext == "jpg":
+        image_ext = "jpeg"
+
+    mime_map = {
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+        "gif": "image/gif",
+        "bmp": "image/bmp",
+        "tiff": "image/tiff",
+    }
+    mime_type = mime_map.get(image_ext, "image/png")
+    fallback_data_url = f"data:{mime_type};base64,{base64.b64encode(img_data).decode()}"
+
+    try:
+        resp = requests.post(
+            "https://img.scdn.io/api/v1.php",
+            files={"image": (f"upload.{image_ext}", img_data, mime_type)},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        uploaded_url = (
+            data.get("url")
+            or data.get("imgurl")
+            or data.get("data", {}).get("url")
+            or data.get("image", {}).get("url")
+        )
+        if uploaded_url and isinstance(uploaded_url, str):
+            return uploaded_url.strip()
+
+        print(f"[IMG_UPLOAD WARN] Unexpected response: {data}")
+    except Exception as e:
+        print(f"[IMG_UPLOAD ERROR] {e}")
+
+    return fallback_data_url
 
 # ==========================================
 # 3. 核心路由
@@ -782,7 +819,8 @@ def publish():
         is_top = 1 if request.form.get('publish_mode') == 'top' else 0
         def img_replacer(match):
             try:
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
                 return f'src="{cdn}"' if cdn else match.group(0)
             except: return match.group(0)
         
@@ -815,7 +853,8 @@ def edit_article(aid):
         is_top = 1 if request.form.get('publish_mode') == 'top' else 0
         def img_replacer(match):
             try:
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
                 return f'src="{cdn}"' if cdn else match.group(0)
             except: return match.group(0)
             
@@ -1378,6 +1417,17 @@ def build_preview_text(text, limit=20):
 
 
 COMMAND_TOKEN_RE = re.compile(r"(#小程序://\S+|mp://\S+)")
+COMMAND_TOKEN_CORE_RE = re.compile(r"([A-Za-z0-9]{8,})")
+
+
+def normalize_command_token(token):
+    token = (token or "").strip()
+    if not token:
+        return ""
+    core_matches = COMMAND_TOKEN_CORE_RE.findall(token)
+    if core_matches:
+        return f"mp://{core_matches[-1]}"
+    return token
 
 
 def extract_command_token(text):
@@ -1393,8 +1443,34 @@ def extract_command_tokens(text):
     return COMMAND_TOKEN_RE.findall(text)
 
 
+def extract_normalized_command_tokens(text):
+    if not text:
+        return []
+    normalized = []
+    for token in COMMAND_TOKEN_RE.findall(text):
+        normalized_token = normalize_command_token(token)
+        if normalized_token:
+            normalized.append(normalized_token)
+    return normalized
+
+
+def get_command_token_signature(text):
+    tokens = extract_normalized_command_tokens(text)
+    if not tokens:
+        return ""
+    return "\n".join(tokens)
+
+
+def get_command_text_signature(text):
+    return normalize_title(strip_command_token(text or ""))
+
+
+def get_command_text_score(text):
+    return len(get_command_text_signature(text))
+
+
 def get_token_only_signature(text):
-    tokens = extract_command_tokens(text)
+    tokens = extract_normalized_command_tokens(text)
     if not tokens:
         return ""
     stripped = strip_command_token(text)
@@ -1453,6 +1529,35 @@ def fetch_article_token_only_signature(url, site_key):
         return get_token_only_signature(" ".join(parts))
     except Exception:
         return ""
+
+
+def fetch_article_command_meta(url, site_key):
+    if not url or site_key not in SITES_CONFIG:
+        return {"token_signature": "", "text_signature": "", "text_score": 0}
+    try:
+        r = session_req.get(url, timeout=4)
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        selectors = SITES_CONFIG[site_key]["content_selector"].split(",")
+        parts = []
+        for sel in selectors:
+            node = soup.select_one(sel.strip())
+            if node:
+                text = node.get_text(" ", strip=True)
+                if text:
+                    parts.append(text)
+        soup.decompose()
+        if not parts:
+            return {"token_signature": "", "text_signature": "", "text_score": 0}
+        joined = " ".join(parts)
+        text_signature = get_command_text_signature(joined)
+        return {
+            "token_signature": get_command_token_signature(joined),
+            "text_signature": text_signature,
+            "text_score": len(text_signature),
+        }
+    except Exception:
+        return {"token_signature": "", "text_signature": "", "text_score": 0}
 
 
 def _send_one_notification(notify_title, notify_url, preview_title, preview_body):
@@ -1559,18 +1664,20 @@ def scrape_all_sites():
                     log_stats[SITE_LOG_NAMES.get(skey, skey)] = "skipped"
 
             seen_titles_this_run = set()
-            seen_token_hashes = set()
+            current_run_token_best = {}
+            recent_token_text_pairs = set()
             recent_articles = conn.execute(
                 "SELECT title, token_only_signature FROM articles WHERE updated_at > (now() - interval '30 minutes')"
             ).fetchall()
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
             for row in recent_articles:
-                if row.get('token_only_signature'):
-                    seen_token_hashes.add(row['token_only_signature'])
+                token_signature = row.get('token_only_signature')
+                if not token_signature:
+                    token_signature = get_command_token_signature(row['title'])
+                if not token_signature:
                     continue
-                token_signature = get_token_only_signature(row['title'])
-                if token_signature:
-                    seen_token_hashes.add(token_signature)
+                text_signature = get_command_text_signature(row['title'])
+                recent_token_text_pairs.add((token_signature, text_signature))
             inserted_articles = []
 
             if due_sites:
@@ -1629,13 +1736,25 @@ def scrape_all_sites():
                             continue
                         if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
                             continue
-                        token_signature = get_token_only_signature(title)
+                        token_signature = get_command_token_signature(title)
+                        text_signature = get_command_text_signature(title)
+                        text_score = len(text_signature)
                         if not token_signature and DETAIL_SIGNATURE_FETCH_ENABLED:
-                            token_signature = fetch_article_token_only_signature(url, skey)
+                            detail_meta = fetch_article_command_meta(url, skey)
+                            token_signature = detail_meta["token_signature"]
+                            if detail_meta["text_score"] > text_score:
+                                text_signature = detail_meta["text_signature"]
+                                text_score = detail_meta["text_score"]
                         if token_signature:
-                            if token_signature in seen_token_hashes:
+                            if (token_signature, text_signature) in recent_token_text_pairs:
                                 continue
-                            seen_token_hashes.add(token_signature)
+                            best_seen = current_run_token_best.get(token_signature)
+                            if best_seen and best_seen["text_score"] >= text_score:
+                                continue
+                            current_run_token_best[token_signature] = {
+                                "text_score": text_score,
+                                "text_signature": text_signature,
+                            }
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             continue
                         if any(b in url for b in url_black) or any(b in title for b in title_black):
