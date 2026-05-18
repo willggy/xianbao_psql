@@ -46,6 +46,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
+PUBLISH_API_TOKEN = os.environ.get("PUBLISH_API_TOKEN", "").strip()
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
 WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "").strip()
 ALERT_ENABLED = os.environ.get("ALERT_ENABLED", "0").strip() == "1"
@@ -548,6 +549,57 @@ def upload_to_img_cdn(img_data, image_ext="png"):
 
     return fallback_data_url
 
+
+def process_publish_content(raw_content):
+    raw_content = raw_content or ""
+
+    def img_replacer(match):
+        try:
+            image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
+            cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
+            return f'src="{cdn}"' if cdn else match.group(0)
+        except Exception:
+            return match.group(0)
+
+    return re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+
+
+def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精选"):
+    title = (title or "").strip()
+    raw_content = raw_content or ""
+    if not title or not raw_content.strip():
+        raise ValueError("title and content are required")
+
+    processed = process_publish_content(raw_content)
+    fake_url = f"user://{int(time.time())}-{os.urandom(4).hex()}"
+    original_time = get_beijing_now().strftime("%Y-%m-%d %H:%M")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO articles (title, url, site_source, match_keyword, original_time, is_top) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                (title, fake_url, "user", match_keyword, original_time, 1 if is_top else 0),
+            )
+            article_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO article_content (url, content) VALUES (%s, %s) "
+            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+            (fake_url, processed),
+        )
+        conn.commit()
+        return {
+            "id": article_id,
+            "url": fake_url,
+            "view_url": build_article_view_url(article_id),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 # ==========================================
 # 3. 核心路由
 # ==========================================
@@ -584,16 +636,30 @@ def index():
         else:
             where += " AND match_keyword = %s"
             params.append(tag)
+    total_from_join = False
     if q:
-        where += " AND title LIKE %s"
-        params.append(f"%{q}%")
+        keywords = q.strip().split()
+        for kw in keywords:
+            where += " AND (title ILIKE %s OR match_keyword ILIKE %s OR ac.content ILIKE %s)"
+            params += [f"%{kw}%", f"%{kw}%", f"%{kw}%"]
+        order_sql = "ORDER BY CASE WHEN title ILIKE %s THEN 0 ELSE 1 END, is_top DESC, updated_at DESC, id DESC"
+        params.append(f"%{keywords[0]}%")
+        from_sql = "FROM articles LEFT JOIN article_content ac ON ac.url = articles.url"
+        total_from_join = True
+    else:
+        order_sql = "ORDER BY is_top DESC, updated_at DESC, id DESC"
+        from_sql = "FROM articles"
     
     articles = conn.execute(
-        f'SELECT * FROM articles {where} ORDER BY is_top DESC, updated_at DESC, id DESC LIMIT %s OFFSET %s',
+        f'SELECT articles.* {from_sql} {where} {order_sql} LIMIT %s OFFSET %s',
         params + [PER_PAGE, (page-1)*PER_PAGE],
     ).fetchall()
     
-    total = conn.execute(f'SELECT COUNT(*) FROM articles {where}', params).fetchone()["count"]
+    if total_from_join:
+        total_sql = f'SELECT COUNT(*) {from_sql} {where}'
+        total = conn.execute(total_sql, params).fetchone()["count"]
+    else:
+        total = conn.execute(f'SELECT COUNT(*) {from_sql} {where}', params).fetchone()["count"]
     conn.close()
 
     return render_template('index.html', 
@@ -817,20 +883,9 @@ def publish():
         title = request.form.get('title')
         raw_content = request.form.get('content')
         is_top = 1 if request.form.get('publish_mode') == 'top' else 0
-        def img_replacer(match):
-            try:
-                image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
-                return f'src="{cdn}"' if cdn else match.group(0)
-            except: return match.group(0)
-        
-        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
-        fake_url = f"user://{int(time.time())}"
-        
-        conn = get_db_connection()
-        conn.execute(
-            "INSERT INTO articles (title, url, site_source, match_keyword, original_time, is_top) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
+        create_user_article(title, raw_content, is_top=is_top)
+        return redirect('/')
+        """
             (title, fake_url, "user", "羊毛精选", "刚刚", is_top),
         )
         conn.execute(
@@ -841,7 +896,37 @@ def publish():
         conn.commit()
         conn.close()
         return redirect('/')
+        """
     return render_template('publish.html')
+
+
+@app.route('/api/publish', methods=['POST'])
+def api_publish():
+    auth_header = request.headers.get("Authorization", "").strip()
+    token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else request.headers.get("X-API-Token", "").strip()
+    if not PUBLISH_API_TOKEN or token != PUBLISH_API_TOKEN:
+        return {"status": "error", "message": "Unauthorized"}, 401
+
+    data = request.get_json(silent=True) or {}
+    title = data.get("title", "")
+    content = data.get("content", "")
+    is_top = bool(data.get("is_top", False))
+    match_keyword = (data.get("match_keyword") or "缇婃瘺绮鹃€?").strip()
+
+    try:
+        article = create_user_article(title, content, is_top=is_top, match_keyword=match_keyword)
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}, 400
+    except Exception as e:
+        print(f"[API_PUBLISH ERROR] {e}")
+        return {"status": "error", "message": "publish failed"}, 500
+
+    return {
+        "status": "success",
+        "id": article["id"],
+        "url": article["url"],
+        "view_url": article["view_url"],
+    }, 201
 
 @app.route('/article/edit/<int:aid>', methods=['GET', 'POST'])
 @login_required
@@ -1742,9 +1827,6 @@ def scrape_all_sites():
                         if not token_signature and DETAIL_SIGNATURE_FETCH_ENABLED:
                             detail_meta = fetch_article_command_meta(url, skey)
                             token_signature = detail_meta["token_signature"]
-                            if detail_meta["text_score"] > text_score:
-                                text_signature = detail_meta["text_signature"]
-                                text_score = detail_meta["text_score"]
                         if token_signature:
                             if (token_signature, text_signature) in recent_token_text_pairs:
                                 continue
@@ -1755,6 +1837,13 @@ def scrape_all_sites():
                                 "text_score": text_score,
                                 "text_signature": text_signature,
                             }
+                            elif best_seen and best_seen["text_score"] >= max(text_score, detail_text_score):
+                                continue
+                            else:
+                                current_run_token_best[token_signature] = {
+                                    "text_score": max(text_score, detail_text_score),
+                                    "text_signature": text_signature,
+                                }
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             continue
                         if any(b in url for b in url_black) or any(b in title for b in title_black):
