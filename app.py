@@ -66,7 +66,7 @@ SITES_CONFIG = {
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
         "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)",
-        "scrape_interval_min": 2,
+        "scrape_interval_min": 0,
         "max_items_per_run": 40,
         "original_url_selectors": [
             "a[href*='source']",
@@ -84,7 +84,7 @@ SITES_CONFIG = {
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
         "content_selector": ".thread-content",
-        "scrape_interval_min": 4,
+        "scrape_interval_min": 0,
         "max_items_per_run": 40,
         "original_url_selectors": [
             ".thread-content a[href]",
@@ -101,7 +101,7 @@ SITES_CONFIG = {
         "list_url": "https://xianbao.icu/xianbao",  
         "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
         "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text",
-        "scrape_interval_min": 4,
+        "scrape_interval_min": 0,
         "max_items_per_run": 40,
         "original_url_selectors": [
             "a[href*='source']",
@@ -124,11 +124,12 @@ BANK_KEYWORDS = {
 ALL_BANK_VALS = [word for words in BANK_KEYWORDS.values() for word in words]
 
 ALERT_GROUPS = {
-    "农行": ["农行", "农业银行", "农", "nh"],
-    "工行": ["工行", "工商银行", "工", "gh"],
-    "建行": ["建行", "建设银行", "建", "CCB", "jh"],
-    "中行": ["中行", "中国银行", "中hang"],
+    "农行": ["农行", "农业银行", "nh"],
+    "工行": ["工行", "工商银行", "gh"],
+    "建行": ["建行", "建设银行", "CCB", "jh"],
+    "中行": ["中行", "中国银行", "中hang", "boc", "zh"],
 }
+ALERT_ALL_VALS = [word for words in ALERT_GROUPS.values() for word in words]
 TITLE_SIMILARITY_THRESHOLD = 0.85
 SITE_LOG_NAMES = {
     "xianbao": "线报库",
@@ -1750,6 +1751,7 @@ def scrape_all_sites():
 
             seen_titles_this_run = set()
             current_run_token_best = {}
+            current_run_body_best = {}
             recent_token_text_pairs = set()
             recent_articles = conn.execute(
                 "SELECT title, token_only_signature FROM articles WHERE updated_at > (now() - interval '30 minutes')"
@@ -1810,6 +1812,43 @@ def scrape_all_sites():
                         update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                         continue
 
+                    # 并行抓正文：提前为匹配 ALERT 的候选批量抓取
+                    body_cache = {}
+                    pre_fetch = []
+                    for item in result["candidates"]:
+                        lower_t = item["title"].lower()
+                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
+                        if kw and kw in ALERT_ALL_VALS and skey in SITES_CONFIG:
+                            pre_fetch.append((item["url"], skey))
+                    if pre_fetch:
+                        with ThreadPoolExecutor(max_workers=3) as exec:
+                            def fetch_and_parse(url, skey):
+                                try:
+                                    r = session_req.get(url, timeout=10)
+                                    r.encoding = "utf-8"
+                                    soup = BeautifulSoup(r.text, "html.parser")
+                                    selectors = SITES_CONFIG[skey]["content_selector"].split(",")
+                                    content_nodes = []
+                                    for sel in selectors:
+                                        node = soup.select_one(sel.strip())
+                                        if node: content_nodes.append(str(node))
+                                    soup.decompose()
+                                    if content_nodes:
+                                        raw_html = "".join(content_nodes)
+                                        text = BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
+                                        return {
+                                            "raw_html": raw_html,
+                                            "token_set": set(extract_normalized_command_tokens(text)),
+                                            "text_only": strip_command_token(text),
+                                        }
+                                except Exception:
+                                    pass
+                                return None
+                            future_map = {exec.submit(fetch_and_parse, url, skey): url for url, skey in pre_fetch}
+                            for f in as_completed(future_map):
+                                url = future_map[f]
+                                body_cache[url] = f.result()
+
                     for item in result["candidates"]:
                         title = item["title"]
                         url = item["url"]
@@ -1824,30 +1863,6 @@ def scrape_all_sites():
                         token_signature = get_command_token_signature(title)
                         text_signature = get_command_text_signature(title)
                         text_score = len(text_signature)
-                        if not token_signature and DETAIL_SIGNATURE_FETCH_ENABLED:
-                            detail_meta = fetch_article_command_meta(url, skey)
-                            token_signature = detail_meta["token_signature"]
-                        if token_signature:
-                            if (token_signature, text_signature) in recent_token_text_pairs:
-                                continue
-                            best_seen = current_run_token_best.get(token_signature)
-                            if best_seen and best_seen["text_score"] >= text_score:
-                                continue
-                            current_run_token_best[token_signature] = {
-                                "text_score": text_score,
-                                "text_signature": text_signature,
-                            }
-                            elif best_seen and best_seen["text_score"] >= max(text_score, detail_text_score):
-                                continue
-                            else:
-                                current_run_token_best[token_signature] = {
-                                    "text_score": max(text_score, detail_text_score),
-                                    "text_signature": text_signature,
-                                }
-                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
-                            continue
-                        if any(b in url for b in url_black) or any(b in title for b in title_black):
-                            continue
 
                         kw = next((k for k in base_keywords if k.lower() in lower_t), None)
                         if not kw:
@@ -1860,6 +1875,63 @@ def scrape_all_sites():
                                 tag = b_name
                                 break
 
+                        body_token_set = set()
+                        body_text_only = ""
+                        body_raw_html = ""
+                        cached = body_cache.get(url)
+                        if cached:
+                            body_raw_html = cached["raw_html"]
+                            body_token_set = cached["token_set"]
+                            body_text_only = cached["text_only"]
+
+                        if body_token_set:
+                            body_sig = "\n".join(sorted(body_token_set))
+                            body_text_len = len(body_text_only)
+                            body_text_sig = normalize_title(body_text_only)
+
+                            # 跨批次：token集 + 正文完全相同才去重
+                            if (body_sig, body_text_sig) in recent_token_text_pairs:
+                                continue
+
+                            # 同批次：相同token集 → 留文字多的
+                            best_seen = current_run_body_best.get(body_sig)
+                            if best_seen:
+                                if best_seen["text_score"] >= body_text_len:
+                                    continue
+                                current_run_body_best[body_sig] = {"text_score": body_text_len}
+                            else:
+                                # 同批次：部分token相同 → 留token多的
+                                is_weaker = False
+                                for existing_sig, existing_data in current_run_body_best.items():
+                                    existing_set = set(existing_sig.split("\n"))
+                                    common = body_token_set & existing_set
+                                    if not common:
+                                        continue
+                                    if len(body_token_set) < len(existing_set):
+                                        is_weaker = True
+                                        break
+                                    if len(body_token_set) == len(existing_set) and body_text_len <= existing_data["text_score"]:
+                                        is_weaker = True
+                                        break
+                                if is_weaker:
+                                    continue
+                                current_run_body_best[body_sig] = {"text_score": body_text_len}
+                        elif token_signature:
+                            if (token_signature, text_signature) in recent_token_text_pairs:
+                                continue
+                            best_seen = current_run_token_best.get(token_signature)
+                            if best_seen and best_seen["text_score"] >= text_score:
+                                continue
+                            current_run_token_best[token_signature] = {
+                                "text_score": text_score,
+                                "text_signature": text_signature,
+                            }
+
+                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
+                            continue
+                        if any(b in url for b in url_black) or any(b in title for b in title_black):
+                            continue
+
                         with conn.cursor() as cur:
                             cur.execute(
                                 'INSERT INTO articles (title, url, site_source, match_keyword, original_time, token_only_signature) '
@@ -1871,6 +1943,18 @@ def scrape_all_sites():
                             if inserted_row:
                                 article_id = inserted_row["id"]
                                 count += 1
+                                if body_raw_html:
+                                    conn.execute(
+                                        "INSERT INTO article_content (url, content) VALUES (%s, %s) "
+                                        "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+                                        (url, body_raw_html),
+                                    )
+                                    if not token_signature and body_token_set:
+                                        body_sig = "\n".join(sorted(body_token_set))
+                                        conn.execute(
+                                            "UPDATE articles SET token_only_signature=%s WHERE id=%s",
+                                            (body_sig, article_id),
+                                        )
                                 matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
                                 if matched_alert:
                                     inserted_articles.append(
