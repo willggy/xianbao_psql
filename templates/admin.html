@@ -1,487 +1,193 @@
 <!DOCTYPE html>
 <html lang="zh">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>线报聚合 - 管理控制台</title>
+    <title>线报聚合 - 管理后台</title>
     <link href="https://lib.baomitu.com/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://lib.baomitu.com/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-
-    <style>
-        :root {
-            --primary-bg: #f3f4f6;
-            --card-border: #eaecf0;
-        }
-
-        body {
-            background-color: var(--primary-bg);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            padding-bottom: 40px;
-        }
-
-        .admin-header {
-            background: #fff;
-            border-bottom: 1px solid #ddd;
-            padding: 15px 0;
-            margin-bottom: 30px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
-        }
-
-        .card {
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-            border: none;
-            margin-bottom: 24px;
-        }
-
-        .card-header {
-            background: #fff;
-            border-bottom: 1px solid var(--card-border);
-            padding: 20px 24px;
-            border-radius: 12px 12px 0 0 !important;
-            font-weight: 700;
-            font-size: 1.1rem;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .stat-card {
-            transition: transform 0.2s;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-3px);
-        }
-
-        .stat-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 24px;
-            margin-right: 15px;
-        }
-
-        .badge-rule {
-            padding: 8px 12px;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-            border: 1px solid #e0e0e0;
-            border-radius: 6px;
-            display: inline-flex;
-            align-items: center;
-            background: #fff;
-            color: #333;
-        }
-
-        .badge-rule .tag-icon {
-            margin-right: 6px;
-            font-size: 12px;
-            opacity: 0.7;
-        }
-
-        .badge-rule .btn-del {
-            margin-left: 8px;
-            cursor: pointer;
-            color: #999;
-            transition: color 0.2s;
-        }
-
-        .badge-rule .btn-del:hover {
-            color: #dc3545;
-        }
-
-        .table-custom thead th {
-            background-color: #f8f9fa;
-            border-bottom: 2px solid #eaecf0;
-            color: #666;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.8rem;
-            letter-spacing: 0.5px;
-            padding: 12px 16px;
-        }
-
-        .table-custom tbody td {
-            vertical-align: middle;
-            padding: 16px;
-            border-bottom: 1px solid #eaecf0;
-        }
-
-        .table-custom tr:last-child td {
-            border-bottom: none;
-        }
-
-        .btn-icon {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        @media (max-width: 768px) {
-            .stat-card {
-                margin-bottom: 15px;
-            }
-        }
-    </style>
 </head>
-
-<body>
-
-    <header class="admin-header">
-        <div class="container d-flex justify-content-between align-items-center">
-            <div class="d-flex align-items-center">
-                <i class="bi bi-speedometer2 text-primary fs-4 me-2"></i>
-                <h4 class="mb-0 fw-bold text-dark">管理控制台</h4>
-            </div>
-            <div class="d-flex gap-2">
-                <a href="/" class="btn btn-outline-secondary btn-sm btn-icon">
-                    <i class="bi bi-house"></i> 返回首页
-                </a>
-                <a href="/logs" class="btn btn-outline-primary btn-sm btn-icon">
-                    <i class="bi bi-terminal"></i> Logs
-                </a>
-                <a href="/admin/featured" class="btn btn-outline-warning btn-sm btn-icon">
-                    <i class="bi bi-stars"></i> 精选管理
-                </a>
-                <a href="/logout" class="btn btn-danger btn-sm btn-icon">
-                    <i class="bi bi-box-arrow-right"></i> 退出
-                </a>
-            </div>
+<body class="bg-light">
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 class="mb-0">管理后台</h4>
+        <div class="d-flex gap-2">
+            <a href="/" class="btn btn-outline-secondary btn-sm">首页</a>
+            <a href="/logs" class="btn btn-outline-primary btn-sm">日志</a>
+            <a href="/admin/featured" class="btn btn-outline-warning btn-sm">精选管理</a>
+            <a href="/logout" class="btn btn-danger btn-sm">退出</a>
         </div>
-    </header>
+    </div>
 
-    <div class="container">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-        <div class="mb-3">
-            {% for category, message in messages %}
-            <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
-                {{ message }}
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-            </div>
-            {% endfor %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="mb-3">
+        {% for category, message in messages %}
+        <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         </div>
-        {% endif %}
-        {% endwith %}
-        <div class="row mb-4">
-            <div class="col-md-4">
-                <div class="card stat-card p-3">
-                    <div class="d-flex align-items-center">
-                        <div class="stat-icon bg-primary bg-opacity-10 text-primary">
-                            <i class="bi bi-database-check"></i>
-                        </div>
-                        <div>
-                            <div class="text-muted small fw-bold">数据总数</div>
-                            <h3 class="mb-0 fw-bold">{{ stats.total_articles }}</h3>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card stat-card p-3">
-                    <div class="d-flex align-items-center">
-                        <div class="stat-icon bg-success bg-opacity-10 text-success">
-                            <i class="bi bi-people"></i>
-                        </div>
-                        <div>
-                            <div class="text-muted small fw-bold">累计访问</div>
-                            <h3 class="mb-0 fw-bold">{{ stats.total_visits }}</h3>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="card stat-card p-3">
-                    <div class="d-flex align-items-center justify-content-between w-100">
-                        <div class="d-flex align-items-center">
-                            <div class="stat-icon bg-warning bg-opacity-10 text-warning">
-                                <i class="bi bi-clock-history"></i>
-                            </div>
-                            <div>
-                                <div class="text-muted small fw-bold">上次抓取</div>
-                                <div class="fw-bold text-truncate" style="max-width: 120px;"
-                                    title="{{ stats.last_update }}">
-                                    {{ stats.last_update if stats.last_update else '尚未抓取' }}
-                                </div>
-                            </div>
-                        </div>
-                        <form id="refreshForm" action="{{ url_for('admin_refresh') }}" method="post" class="d-inline">
-                            <button type="submit" class="btn btn-sm btn-primary btn-icon shadow-sm" id="refreshBtn">
-                                <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
-                                <span id="refreshText">立即更新</span>
-                            </button>
-                        </form>
-                    </div>
-                </div>
-            </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
+    <div class="row g-3 mb-3">
+        <div class="col-md-4">
+            <div class="card"><div class="card-body">
+                <div class="text-muted small">文章总数</div>
+                <div class="fs-4 fw-bold">{{ stats.total_articles }}</div>
+            </div></div>
         </div>
+        <div class="col-md-4">
+            <div class="card"><div class="card-body">
+                <div class="text-muted small">累计访问</div>
+                <div class="fs-4 fw-bold">{{ stats.total_visits }}</div>
+            </div></div>
+        </div>
+        <div class="col-md-4">
+            <div class="card"><div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="text-muted small">上次抓取</div>
+                    <div class="fw-bold">{{ stats.last_update if stats.last_update else '尚未抓取' }}</div>
+                </div>
+                <form action="{{ url_for('admin_refresh') }}" method="post">
+                    <button type="submit" class="btn btn-primary btn-sm">立即刷新</button>
+                </form>
+            </div></div>
+        </div>
+    </div>
 
-        <div class="row">
-            <div class="col-lg-12 mb-4">
-                <div class="card h-100">
-                    <div class="card-header">
-                        <span><i class="bi bi-gear-wide-connected me-2"></i>采集规则配置</span>
-                    </div>
-                    <div class="card-body">
-                        <ul class="nav nav-tabs nav-fill mb-4" id="ruleTabs" role="tablist">
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link active fw-bold" id="white-tab" data-bs-toggle="tab"
-                                    data-bs-target="#white-content" type="button">
-                                    <i class="bi bi-check-circle-fill text-success me-2"></i>采集白名单
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link fw-bold" id="black-tab" data-bs-toggle="tab"
-                                    data-bs-target="#black-content" type="button">
-                                    <i class="bi bi-x-circle-fill text-danger me-2"></i>屏蔽黑名单
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link fw-bold" id="alert-tab" data-bs-toggle="tab"
-                                    data-bs-target="#alert-content" type="button">
-                                    <i class="bi bi-bell-fill text-warning me-2"></i>提醒关键词
-                                </button>
-                            </li>
-                        </ul>
-
-                        <div class="tab-content" id="ruleTabsContent">
-                            <div class="tab-pane fade show active" id="white-content">
-                                <form action="/api/rule" method="POST"
-                                    class="row g-2 mb-4 align-items-center bg-light p-3 rounded">
-                                    <input type="hidden" name="action" value="add">
-                                    <input type="hidden" name="type" value="white">
-                                    <div class="col-auto">
-                                        <span class="fw-bold text-success"><i class="bi bi-plus-lg"></i> 新增规则:</span>
-                                    </div>
-                                    <div class="col-auto">
-                                        <select name="scope" class="form-select form-select-sm border-success">
-                                            <option value="title">📝 匹配标题</option>
-                                            <option value="url">🔗 匹配网址</option>
-                                        </select>
-                                    </div>
-                                    <div class="col">
-                                        <input type="text" name="keyword" class="form-control form-control-sm"
-                                            placeholder="输入关键词..." required>
-                                    </div>
-                                    <div class="col-auto">
-                                        <button class="btn btn-success btn-sm px-3" type="submit">添加</button>
-                                    </div>
-                                </form>
-                                <div class="d-flex flex-wrap gap-2">
-                                    {% for item in whitelist %}
-                                    <div class="badge-rule">
-                                        <span
-                                            class="tag-icon {{ 'text-primary bg-primary' if item['match_scope'] == 'url' else 'text-secondary bg-secondary' }} bg-opacity-10 px-1 rounded">
-                                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}
-                                        </span>
-                                        {{ item['keyword'] }}
-                                        <form action="/api/rule" method="POST" class="d-inline">
-                                            <input type="hidden" name="action" value="delete">
-                                            <input type="hidden" name="id" value="{{ item['id'] }}">
-                                            <i class="bi bi-x-lg btn-del" onclick="this.parentNode.submit()"></i>
-                                        </form>
-                                    </div>
-                                    {% else %}
-                                    <div class="text-muted small fst-italic p-2">暂无白名单规则。</div>
-                                    {% endfor %}
-                                </div>
-                            </div>
-
-                            <div class="tab-pane fade" id="black-content">
-                                <form action="/api/rule" method="POST"
-                                    class="row g-2 mb-4 align-items-center bg-light p-3 rounded">
-                                    <input type="hidden" name="action" value="add">
-                                    <input type="hidden" name="type" value="black">
-                                    <div class="col-auto">
-                                        <span class="fw-bold text-danger"><i class="bi bi-plus-lg"></i> 新增屏蔽:</span>
-                                    </div>
-                                    <div class="col-auto">
-                                        <select name="scope" class="form-select form-select-sm border-danger">
-                                            <option value="title">📝 匹配标题</option>
-                                            <option value="url">🔗 匹配网址</option>
-                                        </select>
-                                    </div>
-                                    <div class="col">
-                                        <input type="text" name="keyword" class="form-control form-control-sm"
-                                            placeholder="输入屏蔽词..." required>
-                                    </div>
-                                    <div class="col-auto">
-                                        <button class="btn btn-danger btn-sm px-3" type="submit">添加</button>
-                                    </div>
-                                </form>
-                                <div class="d-flex flex-wrap gap-2">
-                                    {% for item in blacklist %}
-                                    <div class="badge-rule">
-                                        <span
-                                            class="tag-icon {{ 'text-danger bg-danger' if item['match_scope'] == 'url' else 'text-secondary bg-secondary' }} bg-opacity-10 px-1 rounded">
-                                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}
-                                        </span>
-                                        {{ item['keyword'] }}
-                                        <form action="/api/rule" method="POST" class="d-inline">
-                                            <input type="hidden" name="action" value="delete">
-                                            <input type="hidden" name="id" value="{{ item['id'] }}">
-                                            <i class="bi bi-x-lg btn-del" onclick="this.parentNode.submit()"></i>
-                                        </form>
-                                    </div>
-                                    {% else %}
-                                    <div class="text-muted small fst-italic p-2">暂无黑名单规则。</div>
-                                    {% endfor %}
-                                </div>
-                            </div>
-                            <div class="tab-pane fade" id="alert-content">
-                                <div class="row g-2 mb-4 align-items-center bg-light p-3 rounded">
-                                    <div class="col-lg">
-                                        <form action="/api/rule" method="POST" class="row g-2 align-items-center">
-                                            <input type="hidden" name="action" value="add">
-                                            <input type="hidden" name="type" value="alert">
-                                            <div class="col-auto">
-                                                <span class="fw-bold text-warning"><i class="bi bi-plus-lg"></i> 新增提醒:</span>
-                                            </div>
-                                            <div class="col-auto">
-                                                <select name="scope" class="form-select form-select-sm border-warning">
-                                                    <option value="title">标题</option>
-                                                    <option value="url">URL</option>
-                                                </select>
-                                            </div>
-                                            <div class="col">
-                                                <input type="text" name="keyword" class="form-control form-control-sm"
-                                                    placeholder="输入提醒关键词..." required>
-                                            </div>
-                                            <div class="col-auto">
-                                                <button class="btn btn-warning btn-sm px-3" type="submit">添加</button>
-                                            </div>
-                                        </form>
-                                    </div>
-                                    <div class="col-auto">
-                                        <form action="{{ url_for('sync_bank_alerts') }}" method="post">
-                                            <button class="btn btn-outline-warning btn-sm px-3" type="submit">同步 BANK_KEYWORDS</button>
-                                        </form>
-                                    </div>
-                                </div>
-                                <div class="d-flex flex-wrap gap-2">
-                                </form>
-                                <div class="d-flex flex-wrap gap-2">
-                                    {% for item in alertlist %}
-                                    <div class="badge-rule">
-                                        <span
-                                            class="tag-icon {{ 'text-warning bg-warning' if item['match_scope'] == 'url' else 'text-secondary bg-secondary' }} bg-opacity-10 px-1 rounded">
-                                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}
-                                        </span>
-                                        {{ item['keyword'] }}
-                                        <form action="/api/rule" method="POST" class="d-inline">
-                                            <input type="hidden" name="action" value="delete">
-                                            <input type="hidden" name="id" value="{{ item['id'] }}">
-                                            <i class="bi bi-x-lg btn-del" onclick="this.parentNode.submit()"></i>
-                                        </form>
-                                    </div>
-                                    {% else %}
-                                    <div class="text-muted small fst-italic p-2">暂无提醒关键词。</div>
-                                    {% endfor %}
-                                </div>
-                            </div>
+    <div class="card mb-3">
+        <div class="card-header fw-bold">规则管理</div>
+        <div class="card-body">
+            <ul class="nav nav-tabs mb-3" role="tablist">
+                <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#whitePane" type="button">白名单</button></li>
+                <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#blackPane" type="button">黑名单</button></li>
+                <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#alertPane" type="button">提醒关键词</button></li>
+            </ul>
+            <div class="tab-content">
+                <div class="tab-pane fade show active" id="whitePane">
+                    <form action="/api/rule" method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="action" value="add">
+                        <input type="hidden" name="type" value="white">
+                        <div class="col-auto">
+                            <select name="scope" class="form-select form-select-sm">
+                                <option value="title">标题</option>
+                                <option value="url">URL</option>
+                            </select>
                         </div>
+                        <div class="col"><input type="text" name="keyword" class="form-control form-control-sm" placeholder="输入关键词" required></div>
+                        <div class="col-auto"><button class="btn btn-success btn-sm" type="submit">添加</button></div>
+                    </form>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% for item in whitelist %}
+                        <span class="badge text-bg-light border">
+                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}: {{ item['keyword'] }}
+                            {% if item.get('alert_group') %} · {{ item.get('alert_group') }}{% endif %}
+                            <form action="/api/rule" method="POST" class="d-inline">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="id" value="{{ item['id'] }}">
+                                <button class="btn btn-link text-danger p-0 ms-1" type="submit"><i class="bi bi-x-lg"></i></button>
+                            </form>
+                        </span>
+                        {% else %}<span class="text-muted">暂无白名单规则</span>{% endfor %}
                     </div>
                 </div>
-            </div>
 
-            <div class="col-lg-12">
-                <div class="card">
-                    <div class="card-header">
-                        <div class="d-flex align-items-center">
-                            <i class="bi bi-file-earmark-text me-2"></i>
-                            <span>内容管理 (我发布的)</span>
+                <div class="tab-pane fade" id="blackPane">
+                    <form action="/api/rule" method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="action" value="add">
+                        <input type="hidden" name="type" value="black">
+                        <div class="col-auto">
+                            <select name="scope" class="form-select form-select-sm">
+                                <option value="title">标题</option>
+                                <option value="url">URL</option>
+                            </select>
                         </div>
-                        <a href="/publish" class="btn btn-success btn-sm btn-icon">
-                            <i class="bi bi-pencil-square"></i> 发布新线报
-                        </a>
-                    </div>
-                    <div class="table-responsive">
-                        <table class="table table-custom table-hover mb-0">
-                            <thead>
-                                <tr>
-                                    <th style="width: 50%;">文章标题</th>
-                                    <th style="width: 15%;">状态</th>
-                                    <th style="width: 15%;">更新时间</th>
-                                    <th style="width: 20%; text-align: right;">操作</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for art in my_articles %}
-                                <tr>
-                                    <td>
-                                        <a href="/view?id={{ art['id'] }}" target="_blank"
-                                            class="text-decoration-none fw-bold text-dark">
-                                            {{ art['title'] }}
-                                        </a>
-                                    </td>
-                                    <td>
-                                        {% if art['is_top'] %}
-                                        <span class="badge bg-danger bg-opacity-10 text-danger border border-danger">
-                                            <i class="bi bi-fire me-1"></i>置顶
-                                        </span>
-                                        {% else %}
-                                        <span class="badge bg-secondary bg-opacity-10 text-secondary border">普通</span>
-                                        {% endif %}
-                                    </td>
-                                    <td class="text-muted small">
-                                        {% if art['updated_at'].strftime is defined %}
-                                        {{ art['updated_at'].strftime('%Y-%m-%d') }}
-                                        {% else %}
-                                        {{ art['updated_at'] }}
-                                        {% endif %}
-                                    </td>
-                                    <td class="text-end">
-                                        <a href="/article/edit/{{ art['id'] }}"
-                                            class="btn btn-outline-primary btn-sm me-1" title="编辑">
-                                            <i class="bi bi-pencil"></i>
-                                        </a>
-                                        <a href="/article/delete/{{ art['id'] }}" class="btn btn-outline-danger btn-sm"
-                                            onclick="return confirm('确认要永久删除这篇文章吗？');" title="删除">
-                                            <i class="bi bi-trash"></i>
-                                        </a>
-                                    </td>
-                                </tr>
-                                {% else %}
-                                <tr>
-                                    <td colspan="4" class="text-center py-5 text-muted bg-light">
-                                        <div class="d-flex flex-column align-items-center">
-                                            <i class="bi bi-inbox fs-1 mb-2 opacity-50"></i>
-                                            <span>您还没有发布过任何内容</span>
-                                        </div>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
+                        <div class="col"><input type="text" name="keyword" class="form-control form-control-sm" placeholder="输入关键词" required></div>
+                        <div class="col-auto"><button class="btn btn-danger btn-sm" type="submit">添加</button></div>
+                    </form>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% for item in blacklist %}
+                        <span class="badge text-bg-light border">
+                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}: {{ item['keyword'] }}
+                            {% if item.get('alert_group') %} · {{ item.get('alert_group') }}{% endif %}
+                            <form action="/api/rule" method="POST" class="d-inline">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="id" value="{{ item['id'] }}">
+                                <button class="btn btn-link text-danger p-0 ms-1" type="submit"><i class="bi bi-x-lg"></i></button>
+                            </form>
+                        </span>
+                        {% else %}<span class="text-muted">暂无黑名单规则</span>{% endfor %}
                     </div>
                 </div>
-            </div>
 
-            <div class="col-12 text-center mt-3">
-                <a href="/logs" class="text-decoration-none text-muted small">
-                    <i class="bi bi-terminal me-1"></i>查看系统运行日志
-                </a>
+                <div class="tab-pane fade" id="alertPane">
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <form action="{{ url_for('sync_bank_alerts') }}" method="post"><button class="btn btn-outline-warning btn-sm" type="submit">同步 BANK_KEYWORDS</button></form>
+                        {% for gname, aliases in alert_groups.items() %}
+                        <form action="{{ url_for('sync_alert_group', group_name=gname) }}" method="POST"><button class="btn btn-outline-secondary btn-sm" type="submit">同步 {{ gname }}</button></form>
+                        {% endfor %}
+                    </div>
+                    <form action="/api/rule" method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="action" value="add">
+                        <input type="hidden" name="type" value="alert">
+                        <div class="col-auto">
+                            <select name="scope" class="form-select form-select-sm">
+                                <option value="title">标题</option>
+                                <option value="url">URL</option>
+                            </select>
+                        </div>
+                        <div class="col"><input type="text" name="keyword" class="form-control form-control-sm" placeholder="输入提醒关键词" required></div>
+                        <div class="col"><input type="text" name="alert_group" class="form-control form-control-sm" placeholder="推送组名（可选）"></div>
+                        <div class="col-auto"><button class="btn btn-warning btn-sm" type="submit">添加</button></div>
+                    </form>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% for item in alertlist %}
+                        <span class="badge text-bg-light border">
+                            {{ 'URL' if item['match_scope'] == 'url' else '标题' }}: {{ item['keyword'] }}
+                            {% if item.get('alert_group') %} · {{ item.get('alert_group') }}{% endif %}
+                            <form action="/api/rule" method="POST" class="d-inline">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="id" value="{{ item['id'] }}">
+                                <button class="btn btn-link text-danger p-0 ms-1" type="submit"><i class="bi bi-x-lg"></i></button>
+                            </form>
+                        </span>
+                        {% else %}<span class="text-muted">暂无提醒关键词</span>{% endfor %}
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
-    <script src="https://lib.baomitu.com/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            document.querySelectorAll('.alert').forEach(function (el) {
-                window.setTimeout(function () {
-                    var alert = bootstrap.Alert.getOrCreateInstance(el);
-                    alert.close();
-                }, 3000);
-            });
-        });
-    </script>
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold">内容管理（我发布的）</span>
+            <a href="/publish" class="btn btn-success btn-sm">发布新线报</a>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-striped mb-0">
+                <thead><tr><th>标题</th><th>状态</th><th>更新时间</th><th class="text-end">操作</th></tr></thead>
+                <tbody>
+                {% for art in my_articles %}
+                <tr>
+                    <td><a href="/view?id={{ art['id'] }}" target="_blank" class="text-decoration-none">{{ art['title'] }}</a></td>
+                    <td>{% if art['is_top'] %}<span class="badge text-bg-danger">置顶</span>{% else %}<span class="badge text-bg-secondary">普通</span>{% endif %}</td>
+                    <td>{% if art['updated_at'].strftime is defined %}{{ art['updated_at'].strftime('%Y-%m-%d %H:%M') }}{% else %}{{ art['updated_at'] }}{% endif %}</td>
+                    <td class="text-end">
+                        <a href="/article/edit/{{ art['id'] }}" class="btn btn-outline-primary btn-sm">编辑</a>
+                        <a href="/article/delete/{{ art['id'] }}" class="btn btn-outline-danger btn-sm" onclick="return confirm('确认要永久删除这篇文章吗？');">删除</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="text-center text-muted py-4">暂无发布内容</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<script src="https://lib.baomitu.com/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 </body>
-
 </html>
