@@ -248,6 +248,20 @@ def ensure_article_feature_columns(conn):
     conn.commit()
 
 
+def ensure_config_rules_schema(conn):
+    try:
+        conn.execute("ALTER TABLE config_rules ADD COLUMN IF NOT EXISTS alert_group TEXT")
+        conn.commit()
+        return True
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[WARN] ensure_config_rules_schema failed: {e}")
+        return False
+
+
 def make_links_clickable(text):
     # 鍖归厤 http/https URL锛屼絾鎺掗櫎宸茬粡鍦?href= 閲岀殑鎯呭喌
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
@@ -719,7 +733,7 @@ def view():
                     
                     # 姝ラ2锛氭潵婧愮綉鍧€鍙樿秴閾炬帴锛堟洿瀹芥澗鍖归厤锛?
                     full_raw_content = re.sub(
-                        r'(鏉ユ簮缃戝潃|鍘熸枃閾炬帴|鍘熸枃鍦板潃|鏉ユ簮鍦板潃)[:锛歖?\s*(https?://[^\s<"]+)',
+                        r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
                         r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
                         full_raw_content,
                         flags=re.IGNORECASE | re.MULTILINE
@@ -734,7 +748,7 @@ def view():
                     original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
-                    content = "鏆傛棤鏍稿績鍐呭"
+                    content = "暂无核心内容"
             else:
                 # 鍏朵粬绔欑偣淇濇寔鍘熼€昏緫锛堜笉鍙橈級
                 selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
@@ -754,7 +768,7 @@ def view():
                     original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
-                    content = "鏆傛棤鍐呭"
+                    content = "暂无内容"
                     
         except Exception as e:
             print(f"Error fetching content: {e}")
@@ -767,6 +781,7 @@ def view():
 def admin_panel():
     conn = get_db_connection()
     ensure_article_feature_columns(conn)
+    ensure_config_rules_schema(conn)
     # 1. 鍏堝垵濮嬪寲鎵€鏈夊彉閲忥紝闃叉 UnboundLocalError
     whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
@@ -776,7 +791,13 @@ def admin_panel():
         # 2. 鎵ц鏁版嵁搴撴煡璇?
         whitelist = conn.execute("SELECT * FROM config_rules WHERE rule_type='white'").fetchall()
         blacklist = conn.execute("SELECT * FROM config_rules WHERE rule_type='black'").fetchall()
-        alertlist = conn.execute("SELECT * FROM config_rules WHERE rule_type='alert'").fetchall()
+        alertlist = conn.execute(
+            "SELECT * FROM config_rules "
+            "WHERE rule_type='alert' "
+            "ORDER BY "
+            "CASE WHEN COALESCE(alert_group, '') = '' THEN 1 ELSE 0 END, "
+            "alert_group ASC, keyword ASC, id DESC"
+        ).fetchall()
         my_articles = conn.execute("SELECT id, title, is_top, updated_at FROM articles WHERE site_source='user' ORDER BY is_top DESC, id DESC").fetchall()
         
         last_log = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY id DESC LIMIT 1').fetchone()
@@ -801,7 +822,15 @@ def admin_panel():
         'total_visits': total_visits, 
         'last_update': last_update
     }
-    return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, alertlist=alertlist, my_articles=my_articles, stats=stats)
+    return render_template(
+        'admin.html',
+        whitelist=whitelist,
+        blacklist=blacklist,
+        alertlist=alertlist,
+        my_articles=my_articles,
+        stats=stats,
+        alert_groups=ALERT_GROUPS,
+    )
 
 
 @app.route('/admin/featured')
@@ -910,7 +939,7 @@ def api_publish():
     title = data.get("title", "")
     content = data.get("content", "")
     is_top = bool(data.get("is_top", False))
-    match_keyword = (data.get("match_keyword") or "缂囧﹥鐦虹划楣冣偓?").strip()
+    match_keyword = (data.get("match_keyword") or "羊毛精选").strip()
 
     try:
         article = create_user_article(title, content, is_top=is_top, match_keyword=match_keyword)
@@ -1019,15 +1048,24 @@ def api_rule():
     rtype = request.form.get('type')
     scope = request.form.get('scope', 'title')
     kw = request.form.get('keyword', '').strip()
+    alert_group = request.form.get('alert_group', '').strip()
     rid = request.form.get('id')
     conn = get_db_connection()
+    has_alert_group = ensure_config_rules_schema(conn)
     try:
         if action == 'add' and kw:
-            conn.execute(
-                "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                (rtype, kw, scope),
-            )
+            if has_alert_group:
+                conn.execute(
+                    "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
+                    (rtype, kw, scope, alert_group if rtype == "alert" else None),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (keyword, match_scope) DO NOTHING",
+                    (rtype, kw, scope),
+                )
         elif action == 'delete' and rid:
             conn.execute("DELETE FROM config_rules WHERE id=%s", (rid,))
         conn.commit()
@@ -1041,25 +1079,73 @@ def api_rule():
 @login_required
 def sync_bank_alerts():
     conn = get_db_connection()
+    has_alert_group = ensure_config_rules_schema(conn)
     added = 0
     try:
-        for keywords in BANK_KEYWORDS.values():
+        for bank_name, keywords in BANK_KEYWORDS.items():
             for keyword in keywords:
                 kw = (keyword or "").strip()
                 if not kw:
                     continue
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                        "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                        ("alert", kw, "title"),
-                    )
+                    if has_alert_group:
+                        cur.execute(
+                            "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
+                            ("alert", kw, "title", bank_name),
+                        )
+                    else:
+                        cur.execute(
+                            "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (keyword, match_scope) DO NOTHING",
+                            ("alert", kw, "title"),
+                        )
                     added += cur.rowcount
         conn.commit()
         flash(f"Bank keywords synced to alert rules: +{added}", "success")
     except Exception as e:
         conn.rollback()
         flash(f"Sync bank alert rules failed: {e}", "danger")
+    finally:
+        conn.close()
+    return redirect(url_for('admin_panel'))
+
+
+@app.route('/admin/sync-alert-group/<group_name>', methods=['POST'])
+@login_required
+def sync_alert_group(group_name):
+    aliases = ALERT_GROUPS.get(group_name)
+    if not aliases:
+        flash(f"Unknown alert group: {group_name}", "warning")
+        return redirect(url_for('admin_panel'))
+
+    conn = get_db_connection()
+    has_alert_group = ensure_config_rules_schema(conn)
+    added = 0
+    try:
+        for keyword in aliases:
+            kw = (keyword or "").strip()
+            if not kw:
+                continue
+                with conn.cursor() as cur:
+                    if has_alert_group:
+                        cur.execute(
+                            "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
+                            ("alert", kw, "title", group_name),
+                        )
+                    else:
+                        cur.execute(
+                            "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (keyword, match_scope) DO NOTHING",
+                            ("alert", kw, "title"),
+                        )
+                    added += cur.rowcount
+        conn.commit()
+        flash(f"Synced alert group {group_name}: +{added}", "success")
+    except Exception as e:
+        conn.rollback()
+        flash(f"Sync alert group failed: {e}", "danger")
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1388,28 +1474,51 @@ def get_rotating_site(now_beijing):
     return rotating_sites[slot % len(rotating_sites)]
 
 def match_alert_group(title_lower, url, title_alert, url_alert):
-    normalized_title = normalize_title(title_lower)
-    matched_title = next(
-        (
-            k for k in title_alert
-            if (k.lower() in title_lower) or (normalize_title(k) and normalize_title(k) in normalized_title)
-        ),
-        None,
-    )
-    matched_url = next((k for k in url_alert if k in url), None)
+    def _match_title_rule(rule):
+        if isinstance(rule, dict):
+            kw = (rule.get("keyword") or "").strip()
+            group = (rule.get("alert_group") or "").strip()
+        else:
+            kw = (rule or "").strip()
+            group = ""
+        if not kw:
+            return None
+        kw_lower = kw.lower()
+        kw_norm = normalize_title(kw)
+        normalized_title = normalize_title(title_lower)
+        if (kw_lower and kw_lower in title_lower) or (kw_norm and kw_norm in normalized_title):
+            return group or kw
+        return None
+
+    def _match_url_rule(rule):
+        if isinstance(rule, dict):
+            kw = (rule.get("keyword") or "").strip()
+            group = (rule.get("alert_group") or "").strip()
+        else:
+            kw = (rule or "").strip()
+            group = ""
+        if kw and kw in url:
+            return group or kw
+        return None
+
+    matched_title = next((m for m in (_match_title_rule(r) for r in title_alert) if m), None)
+    matched_url = next((m for m in (_match_url_rule(r) for r in url_alert) if m), None)
     matched = matched_title or matched_url
     if not matched:
         return None
 
     matched_lower = matched.lower()
+    # If group name is explicitly configured in config_rules, use it directly.
+    if matched in ALERT_GROUPS:
+        return matched
     for group_name, aliases in ALERT_GROUPS.items():
         for alias in aliases:
             alias_norm = normalize_title(alias)
             matched_norm = normalize_title(matched_lower)
             if alias.lower() == matched_lower or (alias_norm and alias_norm == matched_norm):
                 return group_name
-    # Only push grouped alerts; unmatched alert keywords are ignored.
-    return None
+    # Config-rule match is enough to push; fallback to matched value.
+    return matched
 
 
 def keyword_match_in_title(title, keywords):
@@ -1743,13 +1852,20 @@ def scrape_all_sites():
             now_beijing = get_beijing_now()
             conn = get_db_connection()
             ensure_runtime_tables(conn)
+            ensure_config_rules_schema(conn)
 
             rules = conn.execute("SELECT * FROM config_rules").fetchall()
             title_white = [r['keyword'] for r in rules if r['rule_type'] == 'white' and r['match_scope'] == 'title']
             title_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'title']
             url_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'url']
-            title_alert = [r['keyword'] for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'title']
-            url_alert = [r['keyword'] for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'url']
+            title_alert = [
+                {"keyword": r["keyword"], "alert_group": (r.get("alert_group") or "").strip()}
+                for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'title'
+            ]
+            url_alert = [
+                {"keyword": r["keyword"], "alert_group": (r.get("alert_group") or "").strip()}
+                for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'url'
+            ]
 
             base_keywords = ALL_BANK_VALS + title_white
             state_map = load_scrape_state(conn)
@@ -2010,7 +2126,7 @@ def scrape_all_sites():
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND COALESCE(is_featured, 0) = 0 AND updated_at < (now() - interval '7 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
-                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 鎺ㄩ€侊細{notified}",),
+                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
             )
             conn.execute(
                 'DELETE FROM scrape_log WHERE id NOT IN ('
