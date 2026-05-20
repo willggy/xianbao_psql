@@ -4,7 +4,7 @@ import threading
 import time
 import base64
 import re
-import gc  # 鐢ㄤ簬鎵嬪姩鍥炴敹鍐呭瓨
+import gc  # Manual GC after large HTML parses.
 import ipaddress
 import socket
 from difflib import SequenceMatcher
@@ -35,11 +35,11 @@ except Exception:
     pass
 
 # ==========================================
-# 1. 鍩虹閰嶇疆
+# 1. Basic config
 # ==========================================
 app = Flask(__name__)
 
-# 瀵嗛挜閰嶇疆
+# Secrets and runtime config
 SITE_TITLE = "古希腊掌管羊毛的神"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
@@ -55,10 +55,10 @@ PUBLIC_BASE_URL = (
     os.environ.get("PUBLIC_BASE_URL", "").strip()
     or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 ).rstrip("/")
-# 鏈湴鍙傛暟
+# Local/dev safety switch
 ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
-# 绔欑偣閰嶇疆
+# Site config
 SITES_CONFIG = {
     "xianbao": { 
         "name": "xianbao",
@@ -79,7 +79,7 @@ SITES_CONFIG = {
         ]
     },
     "iehou": { 
-        "name": "鐖辩尨绾挎姤", 
+        "name": "爱猴线报", 
         "domain": "https://iehou.com", 
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
@@ -137,7 +137,7 @@ SITE_LOG_NAMES = {
     "xianbao_icu": "鲸线报",
 }
 
-# 鏁版嵁搴撹矾寰?
+# Local path helpers
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -149,7 +149,7 @@ HEADERS = {
     "Referer": "https://www.google.com/"
 }
 
-# 缃戠粶璇锋眰 Session
+# Shared requests session
 session_req = requests.Session()
 session_req.headers.update(HEADERS)
 adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=1)
@@ -158,13 +158,8 @@ session_req.mount('https://', adapter)
 
 scrape_lock = threading.Lock()
 
-# 銆愪慨鏀?銆戠鍚?Python 3.12+ 鏍囧噯鐨勫寳浜椂闂磋幏鍙栧嚱鏁?
 def get_beijing_now():
-    # 1. 鑾峰彇甯︽椂鍖轰俊鎭殑 UTC 鏃堕棿 (datetime.now(timezone.utc))
-    # 2. 杞崲涓哄寳浜椂鍖?(.astimezone(...))
-    # 3. 绉婚櫎鏃跺尯淇℃伅 (.replace(tzinfo=None)) -> 鍙樻垚鈥滄棤鏃跺尯鈥濆璞?
-    # 涓轰粈涔堣绉婚櫎鏃跺尯锛熷洜涓轰綘鐨勬暟鎹簱鍜屽悗缁殑鍑忔硶閫昏緫浣跨敤鐨勬槸绠€鍗曠殑鏁板瓧璁＄畻锛?
-    # 濡傛灉淇濈暀鏃跺尯锛孭ython 浼氭姤閿?"can't subtract offset-naive and offset-aware datetimes"
+    # Return a naive Beijing-time datetime so existing DB arithmetic keeps working.
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 
@@ -204,11 +199,11 @@ def ensure_secure_config_or_exit():
 
     raise RuntimeError(msg)
 
-# 鍒濆鍖栨椿璺冩椂闂?
+# Last user activity timestamp
 LAST_ACTIVE_TIME = get_beijing_now()
 
 # ==========================================
-# 2. 鏁版嵁搴撲笌宸ュ叿鍑芥暟
+# 2. Database and helpers
 # ==========================================
 
 def login_required(f):
@@ -219,16 +214,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# def get_db_connection():
-#     """
-#     鑾峰彇 Supabase Postgres 杩炴帴锛堜緷璧栫幆澧冨彉閲?DATABASE_URL锛夈€?
-#     浣跨敤 dict_row 浠ヤ究 row['field'] 鍐欐硶淇濇寔涓嶅彉銆?
-#     """
-#     dsn = os.environ.get("DATABASE_URL")
-#     if not dsn:
-#         raise RuntimeError("DATABASE_URL 鏈缃?)
-#     return psycopg.connect(dsn, row_factory=dict_row)
-# 鏈湴
+# Local connection helper
 def get_db_connection():
     dsn = DATABASE_URL
     if not dsn:
@@ -241,6 +227,12 @@ def ensure_article_feature_columns(conn):
     conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS featured_at TIMESTAMP")
     conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS featured_notified INTEGER NOT NULL DEFAULT 0")
     conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS token_only_signature TEXT")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS content_prefetched INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS prefetch_keyword TEXT")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS alert_keyword TEXT")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS notified INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS notified_at TIMESTAMP")
+    conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS notify_error TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_bank_top ON articles(match_keyword, is_top, id DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_featured ON articles(is_featured, id DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_cleanup ON articles(site_source, is_featured, updated_at)")
@@ -263,7 +255,7 @@ def ensure_config_rules_schema(conn):
 
 
 def make_links_clickable(text):
-    # 鍖归厤 http/https URL锛屼絾鎺掗櫎宸茬粡鍦?href= 閲岀殑鎯呭喌
+    # Match plain http/https links but avoid wrapping URLs already inside href.
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
@@ -371,7 +363,6 @@ def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
-    # 銆愪紭鍖栥€戜娇鐢?lxml 瑙ｆ瀽鍣?
     # Convert plain URL after a colon (e.g. "????: https://...") into links.
     html_content = re.sub(
         r'([:?]\s*)(https?://[^\s<"]+)',
@@ -401,9 +392,7 @@ def clean_html(html_content, site_key):
 
     for tag in soup.find_all(True):
 
-        # ============================
-        # 1) 鍥剧墖澶勭悊閫昏緫
-        # ============================
+        # Image handling
         if tag.name == 'img':
             src = (
                 tag.get('src', '').strip()
@@ -422,11 +411,11 @@ def clean_html(html_content, site_key):
             if not src:
                 continue
 
-            # ---- 閬垮厤閲嶅鍖呰 /img_proxy ----
+            # Avoid double-wrapping img_proxy URLs.
             if src.startswith("/img_proxy"):
                 continue
 
-            # ---- 琛ュ叏鍚勭鐩稿璺緞 ----
+            # Normalize relative image URLs.
             if src.startswith('//'):  # //img.xx.com/xx.jpg
                 src = 'https:' + src
 
@@ -448,9 +437,7 @@ def clean_html(html_content, site_key):
                 else:
                     continue
 
-            # ---- 杩欓噷涓嶅仛鏇村澶勭悊锛屽惁鍒欏鏄撹鍒?HTML 鍥剧墖 ----
-
-            # ---- URL 杞箟 + 璧?img_proxy ----
+            # Keep existing percent-encoding, but proxy non-whitelisted hosts.
             # Keep existing percent-encoding, but encode query separators (&, =)
             # inside nested URLs so outer /img_proxy query string will not truncate.
             src = normalize_image_url(src)
@@ -466,26 +453,24 @@ def clean_html(html_content, site_key):
                 'style': 'max-width:100%; height:auto; border-radius:8px; margin:10px 0;'
             }
 
-        # ============================
-        # 2) 閾炬帴澶勭悊閫昏緫
-        # ============================
+        # Link handling
         elif tag.name == 'a':
             href = tag.get('href', '').strip()
             if not href:
                 continue
 
-            # ---- 閬垮厤鑷紩鐢?/img_proxy ----
+            # Avoid self-referencing img_proxy links.
             if href.startswith('/img_proxy'):
                 continue
 
-            # ---- 琛ュ叏鐩稿璺緞 ----
+            # Normalize relative links.
             if href.startswith('//'):
                 href = 'https:' + href
             elif href.startswith('/'):
                 if site_domain:
                     href = urljoin(site_domain, href)
 
-            # ---- 淇濈暀涓烘甯歌摑鑹查摼鎺?----
+            # Preserve standard clickable link styling.
             tag.attrs = {
                 'href': href,
                 'target': '_blank',
@@ -493,7 +478,7 @@ def clean_html(html_content, site_key):
                 'style': 'color:#007aff; text-decoration:underline; word-break:break-all;'
             }
 
-    # 銆愪紭鍖栥€戝厛淇濆瓨缁撴灉鍐嶉攢姣佽В鏋愭爲
+    # Capture output before releasing the soup tree.
     result = str(soup)
     soup.decompose()
     return result
@@ -613,7 +598,7 @@ def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精�
         conn.close()
 
 # ==========================================
-# 3. 鏍稿績璺敱
+# 3. Routes
 # ==========================================
 
 @app.route('/')
@@ -621,9 +606,7 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    # --- 淇敼鍚庣殑 3 鍒嗛挓鍒锋柊閫昏緫 ---
-    # 璁＄畻鐩稿浜庡綋鍓嶅皬鏃讹紝涓嬩竴涓?3 鍒嗛挓鐨勬暣鐐?
-    # 渚嬪锛?3:01 -> 13:03, 13:05 -> 13:06
+    # Compute the next 2-minute refresh boundary.
     next_interval = ((now.minute // 2) + 1) * 2
     
     if next_interval >= 60:
@@ -710,28 +693,28 @@ def view():
             r.encoding = 'utf-8'
             soup = BeautifulSoup(r.text, "html.parser")
             
-            # 鍙拡瀵归哺绾挎姤浣跨敤涓や釜绮剧‘瀹瑰櫒
+            # Use two precise containers for xianbao_icu.
             if site_key == "xianbao_icu":
                 content_parts = []
                 
-                # 绗竴涓鍣細鏍稿績姝ｆ枃锛堜繚鐣欏畬鏁?HTML锛?
+                # Main article body.
                 node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
                 if node1:
                     content_parts.append(str(node1))
                 
-                # 绗簩涓鍣細鏉ユ簮 / 鍏朵粬琛ュ厖锛堜繚鐣欏畬鏁?HTML锛?
+                # Source / supplement block.
                 node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
                 if node2:
                     content_parts.append(str(node2))
                 
                 if content_parts:
-                    # 鍚堝苟瀹屾暣 HTML锛堜袱涓鍣ㄤ箣闂村姞 <br><br> 鍒嗛殧锛?
+                    # Join both blocks with a visible separator.
                     full_raw_content = "<br><br>".join(content_parts)
                     
-                    # 姝ラ1锛氭竻鐞嗗父瑙佸共鎵帮紙鍏ㄨ鍐掑彿銆佺┖鏍笺€佸疄浣擄級
+                    # Clean common spacing noise.
                     full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
                     
-                    # 姝ラ2锛氭潵婧愮綉鍧€鍙樿秴閾炬帴锛堟洿瀹芥澗鍖归厤锛?
+                    # Turn source labels plus URLs into clickable links.
                     full_raw_content = re.sub(
                         r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
                         r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
@@ -750,7 +733,7 @@ def view():
                 else:
                     content = "暂无核心内容"
             else:
-                # 鍏朵粬绔欑偣淇濇寔鍘熼€昏緫锛堜笉鍙橈級
+                # Keep the generic logic for other sites.
                 selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
                 content_nodes = []
                 for sel in selectors:
@@ -782,13 +765,13 @@ def admin_panel():
     conn = get_db_connection()
     ensure_article_feature_columns(conn)
     ensure_config_rules_schema(conn)
-    # 1. 鍏堝垵濮嬪寲鎵€鏈夊彉閲忥紝闃叉 UnboundLocalError
+    # Initialize defaults to avoid UnboundLocalError.
     whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
     last_update = "尚未开始抓取"
     
     try:
-        # 2. 鎵ц鏁版嵁搴撴煡璇?
+        # Load admin data from database.
         whitelist = conn.execute("SELECT * FROM config_rules WHERE rule_type='white'").fetchall()
         blacklist = conn.execute("SELECT * FROM config_rules WHERE rule_type='black'").fetchall()
         alertlist = conn.execute(
@@ -804,7 +787,7 @@ def admin_panel():
         if last_log:
             last_update = last_log["last_scrape"]
             
-        # 娉ㄦ剰锛歅ostgreSQL 鐨?count 杩斿洖鐨勬槸 dict锛岄敭鍚嶉€氬父鏄?'count'
+        # psycopg returns mapping rows here, so use the aliased key.
         res_count = conn.execute("SELECT COUNT(*) as cnt FROM articles").fetchone()
         total_arts = res_count["cnt"] if res_count else 0
         
@@ -812,11 +795,11 @@ def admin_panel():
         total_visits = res_visits["s"] if res_visits and res_visits["s"] else 0
 
     except Exception as e:
-        print(f"鍚庡彴鏁版嵁鍔犺浇澶辫触: {e}") # 鎵撳嵃閿欒鏂逛究璋冭瘯
+        print(f"admin data load failed: {e}")
     finally:
         conn.close()
 
-    # 3. 姝ゆ椂鍙橀噺涓€瀹氬瓨鍦紝涓嶄細鎶ラ敊
+    # Render with safe defaults even if the query failed.
     stats = {
         'total_articles': total_arts, 
         'total_visits': total_visits, 
@@ -913,18 +896,6 @@ def publish():
         is_top = 1 if request.form.get('publish_mode') == 'top' else 0
         create_user_article(title, raw_content, is_top=is_top)
         return redirect('/')
-        """
-            (title, fake_url, "user", "缇婃瘺绮鹃€?, "鍒氬垰", is_top),
-        )
-        conn.execute(
-            "INSERT INTO article_content (url, content) VALUES (%s, %s) "
-            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
-            (fake_url, processed),
-        )
-        conn.commit()
-        conn.close()
-        return redirect('/')
-        """
     return render_template('publish.html')
 
 
@@ -1070,7 +1041,7 @@ def api_rule():
             conn.execute("DELETE FROM config_rules WHERE id=%s", (rid,))
         conn.commit()
     except Exception as e:
-        print(f"瑙勫垯鎿嶄綔澶辫触: {e}")
+        print(f"rule operation failed: {e}")
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1091,7 +1062,9 @@ def sync_bank_alerts():
                     if has_alert_group:
                         cur.execute(
                             "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
-                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
+                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
+                            "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
+                            "WHERE config_rules.rule_type = 'alert'",
                             ("alert", kw, "title", bank_name),
                         )
                     else:
@@ -1127,20 +1100,22 @@ def sync_alert_group(group_name):
             kw = (keyword or "").strip()
             if not kw:
                 continue
-                with conn.cursor() as cur:
-                    if has_alert_group:
-                        cur.execute(
-                            "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
-                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
-                            ("alert", kw, "title", group_name),
-                        )
-                    else:
-                        cur.execute(
-                            "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                            ("alert", kw, "title"),
-                        )
-                    added += cur.rowcount
+            with conn.cursor() as cur:
+                if has_alert_group:
+                    cur.execute(
+                        "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
+                        "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
+                        "WHERE config_rules.rule_type = 'alert'",
+                        ("alert", kw, "title", group_name),
+                    )
+                else:
+                    cur.execute(
+                        "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (keyword, match_scope) DO NOTHING",
+                        ("alert", kw, "title"),
+                    )
+                added += cur.rowcount
         conn.commit()
         flash(f"Synced alert group {group_name}: +{added}", "success")
     except Exception as e:
@@ -1162,8 +1137,8 @@ def show_logs():
 @lru_cache(maxsize=200)
 def fetch_image_cached(url):
     """
-    浠庤繙绋嬫簮涓嬭浇鍥剧墖骞剁紦瀛橈紝閬垮厤閲嶅涓嬭浇銆?
-    杩斿洖 (bytes, content-type)
+    Download and cache remote images.
+    Returns `(bytes, content-type)`.
     """
     r = session_req.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, timeout=15)
     return r.content, r.headers.get("Content-Type", "image/jpeg")
@@ -1171,7 +1146,7 @@ def fetch_image_cached(url):
 
 @app.route('/api/check_update')
 def check_update():
-    """銆愭柊澧炪€戣交閲忕骇妫€鏌ユ帴鍙ｏ紝鏋佸害鑺傜渷娴侀噺"""
+    """Lightweight polling endpoint used by the homepage."""
     conn = get_db_connection()
     row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
@@ -1224,14 +1199,14 @@ def img_proxy():
         if host in {"localhost"}:
             return True
 
-        # IP 瀛楅潰閲?
+        # Literal IP host.
         try:
             ipaddress.ip_address(host)
             return _is_ip_private_or_disallowed(host)
         except ValueError:
             pass
 
-        # 瑙ｆ瀽鍩熷悕 A/AAAA锛屼换涓€鍛戒腑鍐呯綉/淇濈暀鍗虫嫆缁?
+        # Resolve A/AAAA records and reject if any address is private/reserved.
         try:
             infos = socket.getaddrinfo(host, None)
         except Exception:
@@ -1275,7 +1250,7 @@ def img_proxy():
             "sec-fetch-site": "cross-site"
         }
 
-        # 銆愪紭鍖栥€戜娇鐢?stream=True 杩涜娴佸紡浼犺緭锛屾樉钁楅檷浣?RAM 鍗犵敤
+        # Stream upstream image data to reduce RAM usage.
         # Some image hosts reject unknown Referer values; retry once without Referer.
         r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
         if r.status_code in (401, 403, 404):
@@ -1287,7 +1262,7 @@ def img_proxy():
             headers_no_referer.pop("Referer", None)
             r = session_req.get(url, headers=headers_no_referer, timeout=15, stream=True, allow_redirects=True)
 
-        # SSRF 闃叉姢锛氬鏋滃彂鐢熻烦杞紝浜屾鏍￠獙鏈€缁堣惤鐐癸紙闃叉璺冲埌鍐呯綉锛?
+        # Re-check redirects so upstream cannot bounce us into internal hosts.
         final_url = getattr(r, "url", "") or url
         final_parsed = urlparse(final_url)
         final_host = final_parsed.hostname or ""
@@ -1301,7 +1276,7 @@ def img_proxy():
             return "", 404
         
         if r.status_code != 200:
-            print(f"[IMG_PROXY] {url} 杩斿洖 {r.status_code}")
+            print(f"[IMG_PROXY] {url} returned {r.status_code}")
             return Response(
                 "",
                 status=r.status_code,
@@ -1313,15 +1288,15 @@ def img_proxy():
 
         content_type = r.headers.get("Content-Type", "image/jpeg")
         
-        # 銆愪紭鍖栥€戦獙璇?Content-Type 鏄惁涓哄浘鐗囩被鍨?
+        # Verify upstream content type is image-like.
         if not content_type or not any(img_type in content_type.lower() for img_type in ['image/', 'application/octet-stream']):
             if trusted_host and url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
                 content_type = "image/jpeg"
             else:
-                print(f"[WARN] Content-Type 涓嶆槸鍥剧墖绫诲瀷: {content_type}")
+                print(f"[WARN] Content-Type is not image-like: {content_type}")
                 return "", 404
 
-        # 銆愪紭鍖栥€戜娇鐢ㄧ敓鎴愬櫒娴佸紡浼犺緭鏁版嵁锛屼笉鍐嶅皢鏁翠釜鍥剧墖瀛樺叆鍐呭瓨
+        # Yield image chunks directly instead of buffering the full body.
         def generate():
             try:
                 for chunk in r.iter_content(chunk_size=4096):
@@ -1370,7 +1345,7 @@ def logout():
 
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
-    # 鏀寔 header 鎴?query 鍙傛暟楠岃瘉
+    # Accept secret from header or query/body parameter.
     provided_secret = (
         request.headers.get('Authorization') or
         request.args.get('secret') or
@@ -1382,7 +1357,7 @@ def cron_scrape():
     
     now = get_beijing_now()
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
-    # 鍙€夛細鏈€杩?鍒嗛挓鏈変汉璁块棶杩囧氨璺宠繃锛岄伩鍏嶅拰楂樺嘲鍐茬獊
+    # Optional: skip cron during recent user activity to reduce contention.
     # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
     #     print(f"[{now}] Skip cron: recent activity detected")
     #     return {"status": "skipped", "reason": "recent activity"}, 200
@@ -1396,7 +1371,7 @@ def cron_scrape():
         return {"status": "error", "message": str(e)}, 500
 
 # ==========================================
-# 4. 鎶撳彇涓庡惎鍔?
+# 4. Scraping
 # ==========================================
 
 def normalize_title(title_text):
@@ -1633,7 +1608,7 @@ def build_preview_text(text, limit=20):
     return cleaned[:limit] + "..."
 
 
-COMMAND_TOKEN_RE = re.compile(r"(#灏忕▼搴?//\S+|mp://\S+)")
+COMMAND_TOKEN_RE = re.compile(r"(#小程序\s*//\S+|mp://\S+)")
 COMMAND_TOKEN_CORE_RE = re.compile(r"([A-Za-z0-9]{8,})")
 
 
@@ -1793,7 +1768,7 @@ def _send_one_notification(notify_title, notify_url, preview_title, preview_body
             ]
             if preview_body:
                 content_rows.append([{"tag": "text", "text": preview_body}])
-            content_rows.append([{"tag": "a", "text": "鏌ョ湅绾挎姤", "href": notify_url}])
+            content_rows.append([{"tag": "a", "text": "查看线报", "href": notify_url}])
             requests.post(FEISHU_WEBHOOK, json={
                 "msg_type": "post",
                 "content": {
@@ -1817,19 +1792,22 @@ def _send_one_notification(notify_title, notify_url, preview_title, preview_body
 
 def send_match_notifications(new_articles):
     if not ALERT_ENABLED or not new_articles:
-        return 0
+        return []
 
-    sent = 0
+    results = []
     for article in new_articles:
-        notify_title = f"绾挎姤-{article['alert_keyword']}"
+        notify_title = f"线报-{article['alert_keyword']}"
         notify_url = article.get("view_url") or article["url"]
         command_token = article.get("command_token", "")
         cleaned_title = strip_command_token(article["title"])
         preview_title = build_preview_text(cleaned_title or article["title"], limit=20)
-        _send_one_notification(notify_title, notify_url, preview_title, command_token)
-        sent += 1
+        try:
+            _send_one_notification(notify_title, notify_url, preview_title, command_token)
+            results.append({"id": article["id"], "ok": True, "error": ""})
+        except Exception as e:
+            results.append({"id": article["id"], "ok": False, "error": str(e)})
 
-    return sent
+    return results
 
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
@@ -1858,6 +1836,7 @@ def scrape_all_sites():
             title_white = [r['keyword'] for r in rules if r['rule_type'] == 'white' and r['match_scope'] == 'title']
             title_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'title']
             url_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'url']
+            title_alert_keywords = [r['keyword'] for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'title']
             title_alert = [
                 {"keyword": r["keyword"], "alert_group": (r.get("alert_group") or "").strip()}
                 for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'title'
@@ -1867,7 +1846,8 @@ def scrape_all_sites():
                 for r in rules if r['rule_type'] == 'alert' and r['match_scope'] == 'url'
             ]
 
-            base_keywords = ALL_BANK_VALS + title_white
+            # Alert keywords also qualify items for scraping; white remains a separate concept.
+            base_keywords = list(dict.fromkeys(ALL_BANK_VALS + title_white + title_alert_keywords))
             state_map = load_scrape_state(conn)
             due_sites = []
             skipped_sites = []
@@ -1950,13 +1930,13 @@ def scrape_all_sites():
                         update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                         continue
 
-                    # 骞惰鎶撴鏂囷細鎻愬墠涓哄尮閰?ALERT 鐨勫€欓€夋壒閲忔姄鍙?
+                    # Prefetch article bodies in parallel for candidates likely to need alert matching.
                     body_cache = {}
                     pre_fetch = []
                     for item in result["candidates"]:
                         kw = keyword_match_in_title(item["title"], base_keywords)
                         if kw and kw in ALERT_ALL_VALS and skey in SITES_CONFIG:
-                            pre_fetch.append((item["url"], skey))
+                            pre_fetch.append((item["url"], skey, kw))
                     if pre_fetch:
                         with ThreadPoolExecutor(max_workers=3) as exec:
                             def fetch_and_parse(url, skey):
@@ -1981,10 +1961,13 @@ def scrape_all_sites():
                                 except Exception:
                                     pass
                                 return None
-                            future_map = {exec.submit(fetch_and_parse, url, skey): url for url, skey in pre_fetch}
+                            future_map = {exec.submit(fetch_and_parse, url, skey): (url, kw) for url, skey, kw in pre_fetch}
                             for f in as_completed(future_map):
-                                url = future_map[f]
-                                body_cache[url] = f.result()
+                                url, kw = future_map[f]
+                                body_cache[url] = {
+                                    "data": f.result(),
+                                    "prefetch_keyword": kw,
+                                }
 
                     for item in result["candidates"]:
                         title = item["title"]
@@ -2016,28 +1999,30 @@ def scrape_all_sites():
                         body_text_only = ""
                         body_raw_html = ""
                         cached = body_cache.get(url)
-                        if cached:
-                            body_raw_html = cached["raw_html"]
-                            body_token_set = cached["token_set"]
-                            body_text_only = cached["text_only"]
+                        prefetch_keyword = ""
+                        if cached and cached.get("data"):
+                            prefetch_keyword = cached.get("prefetch_keyword") or ""
+                            body_raw_html = cached["data"]["raw_html"]
+                            body_token_set = cached["data"]["token_set"]
+                            body_text_only = cached["data"]["text_only"]
 
                         if body_token_set:
                             body_sig = "\n".join(sorted(body_token_set))
                             body_text_len = len(body_text_only)
                             body_text_sig = normalize_title(body_text_only)
 
-                            # 璺ㄦ壒娆★細token闆?+ 姝ｆ枃瀹屽叏鐩稿悓鎵嶅幓閲?
+                            # Cross-run dedupe: same token set and same normalized body text.
                             if (body_sig, body_text_sig) in recent_token_text_pairs:
                                 continue
 
-                            # 鍚屾壒娆★細鐩稿悓token闆?鈫?鐣欐枃瀛楀鐨?
+                            # Same-run dedupe: same token set, keep the richer text body.
                             best_seen = current_run_body_best.get(body_sig)
                             if best_seen:
                                 if best_seen["text_score"] >= body_text_len:
                                     continue
                                 current_run_body_best[body_sig] = {"text_score": body_text_len}
                             else:
-                                # 鍚屾壒娆★細閮ㄥ垎token鐩稿悓 鈫?鐣檛oken澶氱殑
+                                # Same-run partial-overlap dedupe: keep the entry with more tokens / text.
                                 is_weaker = False
                                 for existing_sig, existing_data in current_run_body_best.items():
                                     existing_set = set(existing_sig.split("\n"))
@@ -2080,11 +2065,19 @@ def scrape_all_sites():
                             if inserted_row:
                                 article_id = inserted_row["id"]
                                 count += 1
+                                conn.execute(
+                                    "UPDATE articles SET prefetch_keyword=%s WHERE id=%s",
+                                    (prefetch_keyword or None, article_id),
+                                )
                                 if body_raw_html:
                                     conn.execute(
                                         "INSERT INTO article_content (url, content) VALUES (%s, %s) "
                                         "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
                                         (url, body_raw_html),
+                                    )
+                                    conn.execute(
+                                        "UPDATE articles SET content_prefetched=1 WHERE id=%s",
+                                        (article_id,),
                                     )
                                     if not token_signature and body_token_set:
                                         body_sig = "\n".join(sorted(body_token_set))
@@ -2093,6 +2086,11 @@ def scrape_all_sites():
                                             (body_sig, article_id),
                                         )
                                 matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
+                                if matched_alert:
+                                    conn.execute(
+                                        "UPDATE articles SET alert_keyword=%s WHERE id=%s",
+                                        (matched_alert, article_id),
+                                    )
                                 if matched_alert:
                                     inserted_articles.append(
                                         {
@@ -2114,7 +2112,18 @@ def scrape_all_sites():
 
             # Commit freshly inserted articles before non-critical side effects.
             conn.commit()
-            notified = send_match_notifications(inserted_articles)
+            notify_results = send_match_notifications(inserted_articles)
+            notified = sum(1 for r in notify_results if r.get("ok"))
+            for r in notify_results:
+                conn.execute(
+                    "UPDATE articles SET notified=%s, notified_at=%s, notify_error=%s WHERE id=%s",
+                    (
+                        1 if r.get("ok") else 0,
+                        now_beijing if r.get("ok") else None,
+                        None if r.get("ok") else (r.get("error") or "")[:500],
+                        r["id"],
+                    ),
+                )
             conn.execute(
                 "DELETE FROM article_content ac WHERE EXISTS ("
                 "SELECT 1 FROM articles a WHERE a.url = ac.url "
