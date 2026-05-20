@@ -1,10 +1,10 @@
-import os
+﻿import os
 import sys
 import threading
 import time
 import base64
 import re
-import gc  # 用于手动回收内存
+import gc  # 鐢ㄤ簬鎵嬪姩鍥炴敹鍐呭瓨
 import ipaddress
 import socket
 from difflib import SequenceMatcher
@@ -35,11 +35,11 @@ except Exception:
     pass
 
 # ==========================================
-# 1. 基础配置
+# 1. 鍩虹閰嶇疆
 # ==========================================
 app = Flask(__name__)
 
-# 密钥配置
+# 瀵嗛挜閰嶇疆
 SITE_TITLE = "古希腊掌管羊毛的神"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
@@ -55,13 +55,13 @@ PUBLIC_BASE_URL = (
     os.environ.get("PUBLIC_BASE_URL", "").strip()
     or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 ).rstrip("/")
-# 本地参数
+# 鏈湴鍙傛暟
 ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
-# 站点配置
+# 绔欑偣閰嶇疆
 SITES_CONFIG = {
     "xianbao": { 
-        "name": "线报库", 
+        "name": "xianbao",
         "domain": "https://new.xianbao.fun", 
         "list_url": "https://new.xianbao.fun/", 
         "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
@@ -79,7 +79,7 @@ SITES_CONFIG = {
         ]
     },
     "iehou": { 
-        "name": "爱猴线报", 
+        "name": "鐖辩尨绾挎姤", 
         "domain": "https://iehou.com", 
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
@@ -96,7 +96,7 @@ SITES_CONFIG = {
         ]
     },
     "xianbao_icu": {
-        "name": "鲸线报",  
+        "name": "xianbao_icu",
         "domain": "https://xianbao.icu",
         "list_url": "https://xianbao.icu/xianbao",  
         "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
@@ -116,10 +116,10 @@ SITES_CONFIG = {
 
 # 银行关键词
 BANK_KEYWORDS = {
-    "农行": ["农行", "农业银行", "农", "nh"],
-    "工行": ["工行", "工商银行", "工", "gh"],
-    "建行": ["建行", "建设银行", "建", "CCB", "jh"],
-    "中行": ["中行", "中国银行", "中hang"]
+    "农行": ["农行", "农业银行", "nh"],
+    "工行": ["工行", "工商银行", "gh"],
+    "建行": ["建行", "建设银行", "CCB", "jh"],
+    "中行": ["中行", "中国银行", "boc", "zh"],
 }
 ALL_BANK_VALS = [word for words in BANK_KEYWORDS.values() for word in words]
 
@@ -127,7 +127,7 @@ ALERT_GROUPS = {
     "农行": ["农行", "农业银行", "nh"],
     "工行": ["工行", "工商银行", "gh"],
     "建行": ["建行", "建设银行", "CCB", "jh"],
-    "中行": ["中行", "中国银行", "中hang", "boc", "zh"],
+    "中行": ["中行", "中国银行", "boc", "zh"],
 }
 ALERT_ALL_VALS = [word for words in ALERT_GROUPS.values() for word in words]
 TITLE_SIMILARITY_THRESHOLD = 0.85
@@ -137,7 +137,7 @@ SITE_LOG_NAMES = {
     "xianbao_icu": "鲸线报",
 }
 
-# 数据库路径
+# 鏁版嵁搴撹矾寰?
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -149,7 +149,7 @@ HEADERS = {
     "Referer": "https://www.google.com/"
 }
 
-# 网络请求 Session
+# 缃戠粶璇锋眰 Session
 session_req = requests.Session()
 session_req.headers.update(HEADERS)
 adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=1)
@@ -158,13 +158,13 @@ session_req.mount('https://', adapter)
 
 scrape_lock = threading.Lock()
 
-# 【修改2】符合 Python 3.12+ 标准的北京时间获取函数
+# 銆愪慨鏀?銆戠鍚?Python 3.12+ 鏍囧噯鐨勫寳浜椂闂磋幏鍙栧嚱鏁?
 def get_beijing_now():
-    # 1. 获取带时区信息的 UTC 时间 (datetime.now(timezone.utc))
-    # 2. 转换为北京时区 (.astimezone(...))
-    # 3. 移除时区信息 (.replace(tzinfo=None)) -> 变成“无时区”对象
-    # 为什么要移除时区？因为你的数据库和后续的减法逻辑使用的是简单的数字计算，
-    # 如果保留时区，Python 会报错 "can't subtract offset-naive and offset-aware datetimes"
+    # 1. 鑾峰彇甯︽椂鍖轰俊鎭殑 UTC 鏃堕棿 (datetime.now(timezone.utc))
+    # 2. 杞崲涓哄寳浜椂鍖?(.astimezone(...))
+    # 3. 绉婚櫎鏃跺尯淇℃伅 (.replace(tzinfo=None)) -> 鍙樻垚鈥滄棤鏃跺尯鈥濆璞?
+    # 涓轰粈涔堣绉婚櫎鏃跺尯锛熷洜涓轰綘鐨勬暟鎹簱鍜屽悗缁殑鍑忔硶閫昏緫浣跨敤鐨勬槸绠€鍗曠殑鏁板瓧璁＄畻锛?
+    # 濡傛灉淇濈暀鏃跺尯锛孭ython 浼氭姤閿?"can't subtract offset-naive and offset-aware datetimes"
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 
@@ -173,32 +173,29 @@ def _warn(msg: str):
 
 
 def ensure_secure_config_or_exit():
-    """
-    上线安全保护：如果仍在使用默认密钥/默认密码，则拒绝启动。
-    本地开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
-    """
+    """Fail fast on insecure defaults in production-like environments."""
     problems = []
 
     if not os.environ.get('SECRET_KEY') or app.secret_key == 'xianbao_secret_key_888':
-        problems.append("SECRET_KEY 未设置或仍为默认值")
+        problems.append("SECRET_KEY is missing or still using default")
 
     if not os.environ.get('ADMIN_PASSWORD') or ADMIN_PASSWORD == '123':
-        problems.append("ADMIN_PASSWORD 未设置或仍为默认值")
+        problems.append("ADMIN_PASSWORD is missing or still using default")
 
     if not os.environ.get('CRON_SECRET') or CRON_SECRET == 'xianbao_secret_key_999':
-        problems.append("CRON_SECRET 未设置或仍为默认值")
+        problems.append("CRON_SECRET is missing or still using default")
 
     if not os.environ.get('DATABASE_URL'):
-        problems.append("DATABASE_URL 未设置（Supabase Postgres 连接串）")
+        problems.append("DATABASE_URL is missing (Supabase Postgres DSN)")
 
     if not problems:
         return
 
     msg = (
-        "检测到不安全的默认配置，将拒绝启动。\n"
+        "Detected insecure defaults; startup aborted.\n"
         + "\n".join([f"- {p}" for p in problems])
-        + "\n\n请在环境变量中设置：SECRET_KEY、ADMIN_PASSWORD、CRON_SECRET。\n"
-        "如仅本机临时调试，可设置 ALLOW_INSECURE_DEFAULTS=1 跳过（不建议对公网）。"
+        + "\n\nSet env vars SECRET_KEY, ADMIN_PASSWORD, CRON_SECRET, DATABASE_URL."
+        + "\nFor local debugging only, set ALLOW_INSECURE_DEFAULTS=1."
     )
 
     if ALLOW_INSECURE_DEFAULTS:
@@ -207,11 +204,11 @@ def ensure_secure_config_or_exit():
 
     raise RuntimeError(msg)
 
-# 初始化活跃时间
+# 鍒濆鍖栨椿璺冩椂闂?
 LAST_ACTIVE_TIME = get_beijing_now()
 
 # ==========================================
-# 2. 数据库与工具函数
+# 2. 鏁版嵁搴撲笌宸ュ叿鍑芥暟
 # ==========================================
 
 def login_required(f):
@@ -224,14 +221,14 @@ def login_required(f):
 
 # def get_db_connection():
 #     """
-#     获取 Supabase Postgres 连接（依赖环境变量 DATABASE_URL）。
-#     使用 dict_row 以便 row['field'] 写法保持不变。
+#     鑾峰彇 Supabase Postgres 杩炴帴锛堜緷璧栫幆澧冨彉閲?DATABASE_URL锛夈€?
+#     浣跨敤 dict_row 浠ヤ究 row['field'] 鍐欐硶淇濇寔涓嶅彉銆?
 #     """
 #     dsn = os.environ.get("DATABASE_URL")
 #     if not dsn:
-#         raise RuntimeError("DATABASE_URL 未设置")
+#         raise RuntimeError("DATABASE_URL 鏈缃?)
 #     return psycopg.connect(dsn, row_factory=dict_row)
-# 本地
+# 鏈湴
 def get_db_connection():
     dsn = DATABASE_URL
     if not dsn:
@@ -252,7 +249,7 @@ def ensure_article_feature_columns(conn):
 
 
 def make_links_clickable(text):
-    # 匹配 http/https URL，但排除已经在 href= 里的情况
+    # 鍖归厤 http/https URL锛屼絾鎺掗櫎宸茬粡鍦?href= 閲岀殑鎯呭喌
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
@@ -303,7 +300,7 @@ def extract_original_url(html_content, fallback_url="", site_key=""):
     # 3) Site-level regex + defaults
     text_blob = soup.get_text(" ", strip=True)
     default_patterns = [
-        r"(?:source|origin|original|from|link)\s*[:：]?\s*(https?://[^\s<>\"']+)",
+        r"(?:source|origin|original|from|link)\s*[:锛歖?\s*(https?://[^\s<>\"']+)",
         r"(https?://[^\s<>\"']+)",
     ]
     for pat in list(regexes) + default_patterns:
@@ -360,7 +357,7 @@ def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
-    # 【优化】使用 lxml 解析器
+    # 銆愪紭鍖栥€戜娇鐢?lxml 瑙ｆ瀽鍣?
     # Convert plain URL after a colon (e.g. "????: https://...") into links.
     html_content = re.sub(
         r'([:?]\s*)(https?://[^\s<"]+)',
@@ -391,7 +388,7 @@ def clean_html(html_content, site_key):
     for tag in soup.find_all(True):
 
         # ============================
-        # 1) 图片处理逻辑
+        # 1) 鍥剧墖澶勭悊閫昏緫
         # ============================
         if tag.name == 'img':
             src = (
@@ -411,11 +408,11 @@ def clean_html(html_content, site_key):
             if not src:
                 continue
 
-            # ---- 避免重复包装 /img_proxy ----
+            # ---- 閬垮厤閲嶅鍖呰 /img_proxy ----
             if src.startswith("/img_proxy"):
                 continue
 
-            # ---- 补全各种相对路径 ----
+            # ---- 琛ュ叏鍚勭鐩稿璺緞 ----
             if src.startswith('//'):  # //img.xx.com/xx.jpg
                 src = 'https:' + src
 
@@ -437,9 +434,9 @@ def clean_html(html_content, site_key):
                 else:
                     continue
 
-            # ---- 这里不做更多处理，否则容易误判 HTML 图片 ----
+            # ---- 杩欓噷涓嶅仛鏇村澶勭悊锛屽惁鍒欏鏄撹鍒?HTML 鍥剧墖 ----
 
-            # ---- URL 转义 + 走 img_proxy ----
+            # ---- URL 杞箟 + 璧?img_proxy ----
             # Keep existing percent-encoding, but encode query separators (&, =)
             # inside nested URLs so outer /img_proxy query string will not truncate.
             src = normalize_image_url(src)
@@ -456,25 +453,25 @@ def clean_html(html_content, site_key):
             }
 
         # ============================
-        # 2) 链接处理逻辑
+        # 2) 閾炬帴澶勭悊閫昏緫
         # ============================
         elif tag.name == 'a':
             href = tag.get('href', '').strip()
             if not href:
                 continue
 
-            # ---- 避免自引用 /img_proxy ----
+            # ---- 閬垮厤鑷紩鐢?/img_proxy ----
             if href.startswith('/img_proxy'):
                 continue
 
-            # ---- 补全相对路径 ----
+            # ---- 琛ュ叏鐩稿璺緞 ----
             if href.startswith('//'):
                 href = 'https:' + href
             elif href.startswith('/'):
                 if site_domain:
                     href = urljoin(site_domain, href)
 
-            # ---- 保留为正常蓝色链接 ----
+            # ---- 淇濈暀涓烘甯歌摑鑹查摼鎺?----
             tag.attrs = {
                 'href': href,
                 'target': '_blank',
@@ -482,7 +479,7 @@ def clean_html(html_content, site_key):
                 'style': 'color:#007aff; text-decoration:underline; word-break:break-all;'
             }
 
-    # 【优化】先保存结果再销毁解析树
+    # 銆愪紭鍖栥€戝厛淇濆瓨缁撴灉鍐嶉攢姣佽В鏋愭爲
     result = str(soup)
     soup.decompose()
     return result
@@ -602,7 +599,7 @@ def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精�
         conn.close()
 
 # ==========================================
-# 3. 核心路由
+# 3. 鏍稿績璺敱
 # ==========================================
 
 @app.route('/')
@@ -610,9 +607,9 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    # --- 修改后的 3 分钟刷新逻辑 ---
-    # 计算相对于当前小时，下一个 3 分钟的整点
-    # 例如：13:01 -> 13:03, 13:05 -> 13:06
+    # --- 淇敼鍚庣殑 3 鍒嗛挓鍒锋柊閫昏緫 ---
+    # 璁＄畻鐩稿浜庡綋鍓嶅皬鏃讹紝涓嬩竴涓?3 鍒嗛挓鐨勬暣鐐?
+    # 渚嬪锛?3:01 -> 13:03, 13:05 -> 13:06
     next_interval = ((now.minute // 2) + 1) * 2
     
     if next_interval >= 60:
@@ -633,22 +630,22 @@ def index():
     params = []
     if tag:
         if tag == '羊毛精选':
-            where += " AND is_featured = 1"
+            where += " AND articles.is_featured = 1"
         else:
-            where += " AND match_keyword = %s"
+            where += " AND articles.match_keyword = %s"
             params.append(tag)
     total_from_join = False
     if q:
         keywords = q.strip().split()
         for kw in keywords:
-            where += " AND (title ILIKE %s OR match_keyword ILIKE %s OR ac.content ILIKE %s)"
+            where += " AND (articles.title ILIKE %s OR articles.match_keyword ILIKE %s OR ac.content ILIKE %s)"
             params += [f"%{kw}%", f"%{kw}%", f"%{kw}%"]
-        order_sql = "ORDER BY CASE WHEN title ILIKE %s THEN 0 ELSE 1 END, is_top DESC, updated_at DESC, id DESC"
+        order_sql = "ORDER BY CASE WHEN articles.title ILIKE %s THEN 0 ELSE 1 END, articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
         params.append(f"%{keywords[0]}%")
         from_sql = "FROM articles LEFT JOIN article_content ac ON ac.url = articles.url"
         total_from_join = True
     else:
-        order_sql = "ORDER BY is_top DESC, updated_at DESC, id DESC"
+        order_sql = "ORDER BY articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
         from_sql = "FROM articles"
     
     articles = conn.execute(
@@ -679,7 +676,8 @@ def view():
     article_id = request.args.get("id", type=int)
     conn = get_db_connection()
     row = conn.execute("SELECT * FROM articles WHERE id=%s", (article_id,)).fetchone()
-    if not row: return "内容不存在", 404
+    if not row:
+        return "内容不存在", 404
     
     url, site_key, title = row["url"], row["site_source"], row["title"]
     original_url = url
@@ -698,30 +696,30 @@ def view():
             r.encoding = 'utf-8'
             soup = BeautifulSoup(r.text, "html.parser")
             
-            # 只针对鲸线报使用两个精确容器
+            # 鍙拡瀵归哺绾挎姤浣跨敤涓や釜绮剧‘瀹瑰櫒
             if site_key == "xianbao_icu":
                 content_parts = []
                 
-                # 第一个容器：核心正文（保留完整 HTML）
+                # 绗竴涓鍣細鏍稿績姝ｆ枃锛堜繚鐣欏畬鏁?HTML锛?
                 node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
                 if node1:
                     content_parts.append(str(node1))
                 
-                # 第二个容器：来源 / 其他补充（保留完整 HTML）
+                # 绗簩涓鍣細鏉ユ簮 / 鍏朵粬琛ュ厖锛堜繚鐣欏畬鏁?HTML锛?
                 node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
                 if node2:
                     content_parts.append(str(node2))
                 
                 if content_parts:
-                    # 合并完整 HTML（两个容器之间加 <br><br> 分隔）
+                    # 鍚堝苟瀹屾暣 HTML锛堜袱涓鍣ㄤ箣闂村姞 <br><br> 鍒嗛殧锛?
                     full_raw_content = "<br><br>".join(content_parts)
                     
-                    # 步骤1：清理常见干扰（全角冒号、空格、实体）
-                    full_raw_content = full_raw_content.replace('：', ':').replace('&nbsp;', ' ').replace('\xa0', ' ')
+                    # 姝ラ1锛氭竻鐞嗗父瑙佸共鎵帮紙鍏ㄨ鍐掑彿銆佺┖鏍笺€佸疄浣擄級
+                    full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
                     
-                    # 步骤2：来源网址变超链接（更宽松匹配）
+                    # 姝ラ2锛氭潵婧愮綉鍧€鍙樿秴閾炬帴锛堟洿瀹芥澗鍖归厤锛?
                     full_raw_content = re.sub(
-                        r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
+                        r'(鏉ユ簮缃戝潃|鍘熸枃閾炬帴|鍘熸枃鍦板潃|鏉ユ簮鍦板潃)[:锛歖?\s*(https?://[^\s<"]+)',
                         r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
                         full_raw_content,
                         flags=re.IGNORECASE | re.MULTILINE
@@ -736,9 +734,9 @@ def view():
                     original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
-                    content = "暂无核心内容"
+                    content = "鏆傛棤鏍稿績鍐呭"
             else:
-                # 其他站点保持原逻辑（不变）
+                # 鍏朵粬绔欑偣淇濇寔鍘熼€昏緫锛堜笉鍙橈級
                 selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
                 content_nodes = []
                 for sel in selectors:
@@ -756,11 +754,11 @@ def view():
                     original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
                     content = clean_html(full_raw_content, site_key)
                 else:
-                    content = "暂无内容"
+                    content = "鏆傛棤鍐呭"
                     
         except Exception as e:
             print(f"Error fetching content: {e}")
-            content = "加载原文失败，请尝试点击右上角原文链接。"
+            content = "加载原文失败，请稍后重试或打开原文链接。"
     conn.close()
     return render_template("detail.html", title=title, content=content, original_url=original_url, time=row['original_time'])
 
@@ -769,13 +767,13 @@ def view():
 def admin_panel():
     conn = get_db_connection()
     ensure_article_feature_columns(conn)
-    # 1. 先初始化所有变量，防止 UnboundLocalError
+    # 1. 鍏堝垵濮嬪寲鎵€鏈夊彉閲忥紝闃叉 UnboundLocalError
     whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
     last_update = "尚未开始抓取"
     
     try:
-        # 2. 执行数据库查询
+        # 2. 鎵ц鏁版嵁搴撴煡璇?
         whitelist = conn.execute("SELECT * FROM config_rules WHERE rule_type='white'").fetchall()
         blacklist = conn.execute("SELECT * FROM config_rules WHERE rule_type='black'").fetchall()
         alertlist = conn.execute("SELECT * FROM config_rules WHERE rule_type='alert'").fetchall()
@@ -785,7 +783,7 @@ def admin_panel():
         if last_log:
             last_update = last_log["last_scrape"]
             
-        # 注意：PostgreSQL 的 count 返回的是 dict，键名通常是 'count'
+        # 娉ㄦ剰锛歅ostgreSQL 鐨?count 杩斿洖鐨勬槸 dict锛岄敭鍚嶉€氬父鏄?'count'
         res_count = conn.execute("SELECT COUNT(*) as cnt FROM articles").fetchone()
         total_arts = res_count["cnt"] if res_count else 0
         
@@ -793,11 +791,11 @@ def admin_panel():
         total_visits = res_visits["s"] if res_visits and res_visits["s"] else 0
 
     except Exception as e:
-        print(f"后台数据加载失败: {e}") # 打印错误方便调试
+        print(f"鍚庡彴鏁版嵁鍔犺浇澶辫触: {e}") # 鎵撳嵃閿欒鏂逛究璋冭瘯
     finally:
         conn.close()
 
-    # 3. 此时变量一定存在，不会报错
+    # 3. 姝ゆ椂鍙橀噺涓€瀹氬瓨鍦紝涓嶄細鎶ラ敊
     stats = {
         'total_articles': total_arts, 
         'total_visits': total_visits, 
@@ -887,7 +885,7 @@ def publish():
         create_user_article(title, raw_content, is_top=is_top)
         return redirect('/')
         """
-            (title, fake_url, "user", "羊毛精选", "刚刚", is_top),
+            (title, fake_url, "user", "缇婃瘺绮鹃€?, "鍒氬垰", is_top),
         )
         conn.execute(
             "INSERT INTO article_content (url, content) VALUES (%s, %s) "
@@ -912,7 +910,7 @@ def api_publish():
     title = data.get("title", "")
     content = data.get("content", "")
     is_top = bool(data.get("is_top", False))
-    match_keyword = (data.get("match_keyword") or "缇婃瘺绮鹃€?").strip()
+    match_keyword = (data.get("match_keyword") or "缂囧﹥鐦虹划楣冣偓?").strip()
 
     try:
         article = create_user_article(title, content, is_top=is_top, match_keyword=match_keyword)
@@ -954,7 +952,8 @@ def edit_article(aid):
         return redirect('/admin')
 
     article = conn.execute("SELECT * FROM articles WHERE id=%s AND site_source='user'", (aid,)).fetchone()
-    if not article: return "未找到文章", 404
+    if not article:
+        return "未找到文章", 404
     content = conn.execute("SELECT content FROM article_content WHERE url=%s", (article['url'],)).fetchone()['content']
     conn.close()
     return render_template('edit.html', article=article, content=content)
@@ -1033,7 +1032,7 @@ def api_rule():
             conn.execute("DELETE FROM config_rules WHERE id=%s", (rid,))
         conn.commit()
     except Exception as e:
-        print(f"规则操作失败: {e}")
+        print(f"瑙勫垯鎿嶄綔澶辫触: {e}")
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1077,8 +1076,8 @@ def show_logs():
 @lru_cache(maxsize=200)
 def fetch_image_cached(url):
     """
-    从远程源下载图片并缓存，避免重复下载。
-    返回 (bytes, content-type)
+    浠庤繙绋嬫簮涓嬭浇鍥剧墖骞剁紦瀛橈紝閬垮厤閲嶅涓嬭浇銆?
+    杩斿洖 (bytes, content-type)
     """
     r = session_req.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, timeout=15)
     return r.content, r.headers.get("Content-Type", "image/jpeg")
@@ -1086,7 +1085,7 @@ def fetch_image_cached(url):
 
 @app.route('/api/check_update')
 def check_update():
-    """【新增】轻量级检查接口，极度节省流量"""
+    """銆愭柊澧炪€戣交閲忕骇妫€鏌ユ帴鍙ｏ紝鏋佸害鑺傜渷娴侀噺"""
     conn = get_db_connection()
     row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
@@ -1139,14 +1138,14 @@ def img_proxy():
         if host in {"localhost"}:
             return True
 
-        # IP 字面量
+        # IP 瀛楅潰閲?
         try:
             ipaddress.ip_address(host)
             return _is_ip_private_or_disallowed(host)
         except ValueError:
             pass
 
-        # 解析域名 A/AAAA，任一命中内网/保留即拒绝
+        # 瑙ｆ瀽鍩熷悕 A/AAAA锛屼换涓€鍛戒腑鍐呯綉/淇濈暀鍗虫嫆缁?
         try:
             infos = socket.getaddrinfo(host, None)
         except Exception:
@@ -1190,7 +1189,7 @@ def img_proxy():
             "sec-fetch-site": "cross-site"
         }
 
-        # 【优化】使用 stream=True 进行流式传输，显著降低 RAM 占用
+        # 銆愪紭鍖栥€戜娇鐢?stream=True 杩涜娴佸紡浼犺緭锛屾樉钁楅檷浣?RAM 鍗犵敤
         # Some image hosts reject unknown Referer values; retry once without Referer.
         r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
         if r.status_code in (401, 403, 404):
@@ -1202,7 +1201,7 @@ def img_proxy():
             headers_no_referer.pop("Referer", None)
             r = session_req.get(url, headers=headers_no_referer, timeout=15, stream=True, allow_redirects=True)
 
-        # SSRF 防护：如果发生跳转，二次校验最终落点（防止跳到内网）
+        # SSRF 闃叉姢锛氬鏋滃彂鐢熻烦杞紝浜屾鏍￠獙鏈€缁堣惤鐐癸紙闃叉璺冲埌鍐呯綉锛?
         final_url = getattr(r, "url", "") or url
         final_parsed = urlparse(final_url)
         final_host = final_parsed.hostname or ""
@@ -1216,7 +1215,7 @@ def img_proxy():
             return "", 404
         
         if r.status_code != 200:
-            print(f"[IMG_PROXY] {url} 返回 {r.status_code}")
+            print(f"[IMG_PROXY] {url} 杩斿洖 {r.status_code}")
             return Response(
                 "",
                 status=r.status_code,
@@ -1228,15 +1227,15 @@ def img_proxy():
 
         content_type = r.headers.get("Content-Type", "image/jpeg")
         
-        # 【优化】验证 Content-Type 是否为图片类型
+        # 銆愪紭鍖栥€戦獙璇?Content-Type 鏄惁涓哄浘鐗囩被鍨?
         if not content_type or not any(img_type in content_type.lower() for img_type in ['image/', 'application/octet-stream']):
             if trusted_host and url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
                 content_type = "image/jpeg"
             else:
-                print(f"[WARN] Content-Type 不是图片类型: {content_type}")
+                print(f"[WARN] Content-Type 涓嶆槸鍥剧墖绫诲瀷: {content_type}")
                 return "", 404
 
-        # 【优化】使用生成器流式传输数据，不再将整个图片存入内存
+        # 銆愪紭鍖栥€戜娇鐢ㄧ敓鎴愬櫒娴佸紡浼犺緭鏁版嵁锛屼笉鍐嶅皢鏁翠釜鍥剧墖瀛樺叆鍐呭瓨
         def generate():
             try:
                 for chunk in r.iter_content(chunk_size=4096):
@@ -1285,7 +1284,7 @@ def logout():
 
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
-    # 支持 header 或 query 参数验证
+    # 鏀寔 header 鎴?query 鍙傛暟楠岃瘉
     provided_secret = (
         request.headers.get('Authorization') or
         request.args.get('secret') or
@@ -1297,7 +1296,7 @@ def cron_scrape():
     
     now = get_beijing_now()
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
-    # 可选：最近5分钟有人访问过就跳过，避免和高峰冲突
+    # 鍙€夛細鏈€杩?鍒嗛挓鏈変汉璁块棶杩囧氨璺宠繃锛岄伩鍏嶅拰楂樺嘲鍐茬獊
     # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
     #     print(f"[{now}] Skip cron: recent activity detected")
     #     return {"status": "skipped", "reason": "recent activity"}, 200
@@ -1311,20 +1310,16 @@ def cron_scrape():
         return {"status": "error", "message": str(e)}, 500
 
 # ==========================================
-# 4. 抓取与启动
+# 4. 鎶撳彇涓庡惎鍔?
 # ==========================================
 
 def normalize_title(title_text):
-    """标题标准化函数：去除空格和标点符号"""
+    """Normalize title by removing punctuation/whitespace and lower-casing."""
     if not title_text:
         return ""
-    # 去除所有空格、换行符、制表符
-    t = re.sub(r'\s+', '', title_text)
-    # 去除中英文常见标点符号
-    punctuation = r"""！？｡＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—''‛""„‟…‧·.!,;:?"'()[]{}<>/-_=+"""
-    t = re.sub(f"[{re.escape(punctuation)}]", "", t)
-    return t.lower()
-
+    t = title_text.lower()
+    t = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", t)
+    return t
 def is_similar_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THRESHOLD):
     if not norm_title:
         return False
@@ -1393,7 +1388,14 @@ def get_rotating_site(now_beijing):
     return rotating_sites[slot % len(rotating_sites)]
 
 def match_alert_group(title_lower, url, title_alert, url_alert):
-    matched_title = next((k for k in title_alert if k.lower() in title_lower), None)
+    normalized_title = normalize_title(title_lower)
+    matched_title = next(
+        (
+            k for k in title_alert
+            if (k.lower() in title_lower) or (normalize_title(k) and normalize_title(k) in normalized_title)
+        ),
+        None,
+    )
     matched_url = next((k for k in url_alert if k in url), None)
     matched = matched_title or matched_url
     if not matched:
@@ -1402,9 +1404,29 @@ def match_alert_group(title_lower, url, title_alert, url_alert):
     matched_lower = matched.lower()
     for group_name, aliases in ALERT_GROUPS.items():
         for alias in aliases:
-            if alias.lower() == matched_lower:
+            alias_norm = normalize_title(alias)
+            matched_norm = normalize_title(matched_lower)
+            if alias.lower() == matched_lower or (alias_norm and alias_norm == matched_norm):
                 return group_name
-    return matched
+    # Only push grouped alerts; unmatched alert keywords are ignored.
+    return None
+
+
+def keyword_match_in_title(title, keywords):
+    title_lower = (title or "").lower()
+    title_norm = normalize_title(title or "")
+    for kw in keywords:
+        kw_lower = (kw or "").lower()
+        kw_norm = normalize_title(kw or "")
+        if kw_lower and kw_lower in title_lower:
+            return kw
+        if kw_norm and kw_norm in title_norm:
+            return kw
+    return None
+
+
+def any_keyword_match_in_title(title, keywords):
+    return keyword_match_in_title(title, keywords) is not None
 
 def fetch_site_candidates(skey, cfg, last_seen_url):
     result = {
@@ -1502,7 +1524,7 @@ def build_preview_text(text, limit=20):
     return cleaned[:limit] + "..."
 
 
-COMMAND_TOKEN_RE = re.compile(r"(#小程序://\S+|mp://\S+)")
+COMMAND_TOKEN_RE = re.compile(r"(#灏忕▼搴?//\S+|mp://\S+)")
 COMMAND_TOKEN_CORE_RE = re.compile(r"([A-Za-z0-9]{8,})")
 
 
@@ -1567,7 +1589,7 @@ def get_token_only_signature(text):
 
 def strip_command_token(text):
     stripped = COMMAND_TOKEN_RE.sub("", text or "")
-    stripped = re.sub(r"\s+", " ", stripped).strip(" -–—|｜,，;；")
+    stripped = re.sub(r"\s+", " ", stripped).strip(" -—|")
     return stripped.strip()
 
 
@@ -1662,7 +1684,7 @@ def _send_one_notification(notify_title, notify_url, preview_title, preview_body
             ]
             if preview_body:
                 content_rows.append([{"tag": "text", "text": preview_body}])
-            content_rows.append([{"tag": "a", "text": "查看线报", "href": notify_url}])
+            content_rows.append([{"tag": "a", "text": "鏌ョ湅绾挎姤", "href": notify_url}])
             requests.post(FEISHU_WEBHOOK, json={
                 "msg_type": "post",
                 "content": {
@@ -1690,7 +1712,7 @@ def send_match_notifications(new_articles):
 
     sent = 0
     for article in new_articles:
-        notify_title = f"线报-{article['alert_keyword']}"
+        notify_title = f"绾挎姤-{article['alert_keyword']}"
         notify_url = article.get("view_url") or article["url"]
         command_token = article.get("command_token", "")
         cleaned_title = strip_command_token(article["title"])
@@ -1812,12 +1834,11 @@ def scrape_all_sites():
                         update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                         continue
 
-                    # 并行抓正文：提前为匹配 ALERT 的候选批量抓取
+                    # 骞惰鎶撴鏂囷細鎻愬墠涓哄尮閰?ALERT 鐨勫€欓€夋壒閲忔姄鍙?
                     body_cache = {}
                     pre_fetch = []
                     for item in result["candidates"]:
-                        lower_t = item["title"].lower()
-                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
+                        kw = keyword_match_in_title(item["title"], base_keywords)
                         if kw and kw in ALERT_ALL_VALS and skey in SITES_CONFIG:
                             pre_fetch.append((item["url"], skey))
                     if pre_fetch:
@@ -1864,7 +1885,7 @@ def scrape_all_sites():
                         text_signature = get_command_text_signature(title)
                         text_score = len(text_signature)
 
-                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
+                        kw = keyword_match_in_title(title, base_keywords)
                         if not kw:
                             continue
 
@@ -1889,18 +1910,18 @@ def scrape_all_sites():
                             body_text_len = len(body_text_only)
                             body_text_sig = normalize_title(body_text_only)
 
-                            # 跨批次：token集 + 正文完全相同才去重
+                            # 璺ㄦ壒娆★細token闆?+ 姝ｆ枃瀹屽叏鐩稿悓鎵嶅幓閲?
                             if (body_sig, body_text_sig) in recent_token_text_pairs:
                                 continue
 
-                            # 同批次：相同token集 → 留文字多的
+                            # 鍚屾壒娆★細鐩稿悓token闆?鈫?鐣欐枃瀛楀鐨?
                             best_seen = current_run_body_best.get(body_sig)
                             if best_seen:
                                 if best_seen["text_score"] >= body_text_len:
                                     continue
                                 current_run_body_best[body_sig] = {"text_score": body_text_len}
                             else:
-                                # 同批次：部分token相同 → 留token多的
+                                # 鍚屾壒娆★細閮ㄥ垎token鐩稿悓 鈫?鐣檛oken澶氱殑
                                 is_weaker = False
                                 for existing_sig, existing_data in current_run_body_best.items():
                                     existing_set = set(existing_sig.split("\n"))
@@ -1929,7 +1950,7 @@ def scrape_all_sites():
 
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             continue
-                        if any(b in url for b in url_black) or any(b in title for b in title_black):
+                        if any(b in url for b in url_black) or any_keyword_match_in_title(title, title_black):
                             continue
 
                         with conn.cursor() as cur:
@@ -1989,7 +2010,7 @@ def scrape_all_sites():
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND COALESCE(is_featured, 0) = 0 AND updated_at < (now() - interval '7 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
-                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
+                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 鎺ㄩ€侊細{notified}",),
             )
             conn.execute(
                 'DELETE FROM scrape_log WHERE id NOT IN ('
@@ -2034,3 +2055,4 @@ if __name__ == '__main__':
     ensure_secure_config_or_exit()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
+
