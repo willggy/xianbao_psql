@@ -1608,7 +1608,7 @@ def build_preview_text(text, limit=20):
     return cleaned[:limit] + "..."
 
 
-COMMAND_TOKEN_RE = re.compile(r"(#小程序\s*//\S+|mp://\S+)")
+COMMAND_TOKEN_RE = re.compile(r"(#小程序://\S+|#小程序\s*//\S+|mp://\S+)")
 COMMAND_TOKEN_CORE_RE = re.compile(r"([A-Za-z0-9]{8,})")
 
 
