@@ -1908,6 +1908,7 @@ def scrape_all_sites():
                             }
 
                 for skey, cfg, last_seen_url in due_sites:
+                    site_order = len(site_stats)  # 0=线报库, 1=爱猴线报, 2=鲸线报 按处理顺序
                     result = site_results.get(skey) or {
                         "site_key": skey,
                         "site_name": cfg.get("name", skey),
@@ -2015,12 +2016,19 @@ def scrape_all_sites():
                             if (body_sig, body_text_sig) in recent_token_text_pairs:
                                 continue
 
-                            # Same-run dedupe: same token set, keep the richer text body.
+                            # Same-run dedupe: same token set.
+                            # 优先保留抓取顺序在前（site_order 更小）的；同站点则留文字多的。
                             best_seen = current_run_body_best.get(body_sig)
                             if best_seen:
-                                if best_seen["text_score"] >= body_text_len:
+                                if best_seen["site_order"] < site_order:
                                     continue
-                                current_run_body_best[body_sig] = {"text_score": body_text_len}
+                                if best_seen["site_order"] == site_order and best_seen["text_score"] >= body_text_len:
+                                    continue
+                                # 当前文章胜出（站点更靠前，或同站点文字更多）
+                                if best_seen.get("article_id"):
+                                    conn.execute("DELETE FROM article_content WHERE url=(SELECT url FROM articles WHERE id=%s)", (best_seen["article_id"],))
+                                    conn.execute("DELETE FROM articles WHERE id=%s", (best_seen["article_id"],))
+                                current_run_body_best[body_sig] = {"text_score": body_text_len, "site_order": site_order, "article_id": None}
                             else:
                                 # Same-run partial-overlap dedupe: keep the entry with more tokens / text.
                                 is_weaker = False
@@ -2032,21 +2040,29 @@ def scrape_all_sites():
                                     if len(body_token_set) < len(existing_set):
                                         is_weaker = True
                                         break
-                                    if len(body_token_set) == len(existing_set) and body_text_len <= existing_data["text_score"]:
-                                        is_weaker = True
-                                        break
+                                    if len(body_token_set) == len(existing_set):
+                                        if existing_data.get("site_order", 0) < site_order:
+                                            is_weaker = True
+                                            break
+                                        if existing_data.get("site_order", 0) == site_order and body_text_len <= existing_data["text_score"]:
+                                            is_weaker = True
+                                            break
                                 if is_weaker:
                                     continue
-                                current_run_body_best[body_sig] = {"text_score": body_text_len}
+                                current_run_body_best[body_sig] = {"text_score": body_text_len, "site_order": site_order}
                         elif token_signature:
                             if (token_signature, text_signature) in recent_token_text_pairs:
                                 continue
                             best_seen = current_run_token_best.get(token_signature)
-                            if best_seen and best_seen["text_score"] >= text_score:
-                                continue
+                            if best_seen:
+                                if best_seen["site_order"] < site_order:
+                                    continue
+                                if best_seen["site_order"] == site_order and best_seen["text_score"] >= text_score:
+                                    continue
                             current_run_token_best[token_signature] = {
                                 "text_score": text_score,
                                 "text_signature": text_signature,
+                                "site_order": site_order,
                             }
 
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
@@ -2085,6 +2101,10 @@ def scrape_all_sites():
                                             "UPDATE articles SET token_only_signature=%s WHERE id=%s",
                                             (body_sig, article_id),
                                         )
+                                    # 记录 article_id，供同批次替换用
+                                    if body_token_set:
+                                        body_sig = "\n".join(sorted(body_token_set))
+                                        current_run_body_best[body_sig] = {"text_score": len(body_text_only), "site_order": site_order, "article_id": article_id}
                                 matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
                                 if matched_alert:
                                     conn.execute(
