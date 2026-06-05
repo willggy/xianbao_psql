@@ -7,3 +7,4 @@ waitress
 psycopg[binary]
 python-dotenv
 gunicorn
+flask-compress

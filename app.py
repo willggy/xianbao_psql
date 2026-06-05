@@ -17,6 +17,11 @@ from psycopg.rows import dict_row
 import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, flash, render_template, request, Response, redirect, session, url_for
+try:
+    from flask_compress import Compress
+    _compress = True
+except Exception:
+    _compress = False
 from bs4 import BeautifulSoup
 from waitress import serve
 
@@ -38,6 +43,8 @@ except Exception:
 # 1. Basic config
 # ==========================================
 app = Flask(__name__)
+if _compress:
+    Compress(app)
 
 # Secrets and runtime config
 SITE_TITLE = "古希腊掌管羊毛的神"
@@ -206,6 +213,36 @@ LAST_ACTIVE_TIME = get_beijing_now()
 # 2. Database and helpers
 # ==========================================
 
+# Simple TTL cache for GET pages (thread-safe, max 500 entries)
+_template_cache = {}
+_template_cache_order = []
+_template_cache_lock = threading.Lock()
+PAGE_CACHE_TTL = 30  # seconds
+PAGE_CACHE_MAX = 500
+
+def render_cached(ttl=PAGE_CACHE_TTL):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            if request.method != "GET" or session.get("is_logged_in"):
+                return f(*args, **kwargs)
+            key = request.full_path
+            now = time.time()
+            entry = _template_cache.get(key)
+            if entry and now - entry["ts"] < ttl:
+                return entry["html"]
+            html = f(*args, **kwargs)
+            with _template_cache_lock:
+                _template_cache[key] = {"html": html, "ts": now}
+                if key not in _template_cache_order:
+                    _template_cache_order.append(key)
+                if len(_template_cache) > PAGE_CACHE_MAX:
+                    old = _template_cache_order.pop(0)
+                    _template_cache.pop(old, None)
+            return html
+        return wrapper
+    return decorator
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -237,6 +274,7 @@ def ensure_article_feature_columns(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_featured ON articles(is_featured, id DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_cleanup ON articles(site_source, is_featured, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_token_only_signature ON articles(token_only_signature)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_update_sort ON articles(updated_at DESC, id DESC)")
     conn.commit()
 
 
@@ -602,6 +640,7 @@ def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精�
 # ==========================================
 
 @app.route('/')
+@render_cached()
 def index():
     record_visit()
     now = get_beijing_now()
@@ -652,7 +691,7 @@ def index():
     
     if total_from_join:
         total_sql = f'SELECT COUNT(*) {from_sql} {where}'
-        total = conn.execute(total_sql, params).fetchone()["count"]
+        total = conn.execute(total_sql, params[:-1]).fetchone()["count"]
     else:
         total = conn.execute(f'SELECT COUNT(*) {from_sql} {where}', params).fetchone()["count"]
     conn.close()
@@ -1944,21 +1983,33 @@ def scrape_all_sites():
                                 try:
                                     r = session_req.get(url, timeout=10)
                                     r.encoding = "utf-8"
-                                    soup = BeautifulSoup(r.text, "html.parser")
+                                    raw_text = r.text
+                                    del r
+                                    soup = BeautifulSoup(raw_text, "html.parser")
+                                    del raw_text
                                     selectors = SITES_CONFIG[skey]["content_selector"].split(",")
                                     content_nodes = []
                                     for sel in selectors:
                                         node = soup.select_one(sel.strip())
                                         if node: content_nodes.append(str(node))
                                     soup.decompose()
+                                    del soup
                                     if content_nodes:
                                         raw_html = "".join(content_nodes)
-                                        text = BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
-                                        return {
+                                        del content_nodes
+                                        inner = BeautifulSoup(raw_html, "html.parser")
+                                        text = inner.get_text(" ", strip=True)
+                                        inner.decompose()
+                                        del inner
+                                        result = {
                                             "raw_html": raw_html,
                                             "token_set": set(extract_normalized_command_tokens(text)),
                                             "text_only": strip_command_token(text),
                                         }
+                                        del raw_html, text
+                                        gc.collect()
+                                        return result
+                                    gc.collect()
                                 except Exception:
                                     pass
                                 return None
@@ -2025,9 +2076,11 @@ def scrape_all_sites():
                                 if best_seen["site_order"] == site_order and best_seen["text_score"] >= body_text_len:
                                     continue
                                 # 当前文章胜出（站点更靠前，或同站点文字更多）
-                                if best_seen.get("article_id"):
-                                    conn.execute("DELETE FROM article_content WHERE url=(SELECT url FROM articles WHERE id=%s)", (best_seen["article_id"],))
-                                    conn.execute("DELETE FROM articles WHERE id=%s", (best_seen["article_id"],))
+                                old_id = best_seen.get("article_id")
+                                if old_id:
+                                    conn.execute("DELETE FROM article_content WHERE url=(SELECT url FROM articles WHERE id=%s)", (old_id,))
+                                    conn.execute("DELETE FROM articles WHERE id=%s", (old_id,))
+                                    inserted_articles[:] = [a for a in inserted_articles if a["id"] != old_id]
                                 current_run_body_best[body_sig] = {"text_score": body_text_len, "site_order": site_order, "article_id": None}
                             else:
                                 # Same-run partial-overlap dedupe: keep the entry with more tokens / text.
@@ -2059,10 +2112,15 @@ def scrape_all_sites():
                                     continue
                                 if best_seen["site_order"] == site_order and best_seen["text_score"] >= text_score:
                                     continue
+                                old_id = best_seen.get("article_id")
+                                if old_id:
+                                    conn.execute("DELETE FROM articles WHERE id=%s", (old_id,))
+                                    inserted_articles[:] = [a for a in inserted_articles if a["id"] != old_id]
                             current_run_token_best[token_signature] = {
                                 "text_score": text_score,
                                 "text_signature": text_signature,
                                 "site_order": site_order,
+                                "article_id": None,
                             }
 
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
@@ -2105,6 +2163,8 @@ def scrape_all_sites():
                                     if body_token_set:
                                         body_sig = "\n".join(sorted(body_token_set))
                                         current_run_body_best[body_sig] = {"text_score": len(body_text_only), "site_order": site_order, "article_id": article_id}
+                                if token_signature and token_signature in current_run_token_best:
+                                    current_run_token_best[token_signature]["article_id"] = article_id
                                 matched_alert = match_alert_group(lower_t, url, title_alert, url_alert)
                                 if matched_alert:
                                     conn.execute(
