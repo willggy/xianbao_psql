@@ -275,6 +275,11 @@ def ensure_article_feature_columns(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_cleanup ON articles(site_source, is_featured, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_token_only_signature ON articles(token_only_signature)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_update_sort ON articles(updated_at DESC, id DESC)")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_articles_home_cover
+        ON articles (is_top DESC, updated_at DESC, id DESC)
+        INCLUDE (title, url, site_source, match_keyword, original_time)
+    """)
     conn.commit()
 
 
@@ -684,8 +689,13 @@ def index():
         order_sql = "ORDER BY articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
         from_sql = "FROM articles"
     
+    # 只取模板需要的列，减少传输/解析开销
+    article_cols = (
+        "articles.id, articles.title, articles.url, articles.site_source, "
+        "articles.match_keyword, articles.is_top, articles.original_time, articles.updated_at"
+    )
     articles = conn.execute(
-        f'SELECT articles.* {from_sql} {where} {order_sql} LIMIT %s OFFSET %s',
+        f'SELECT {article_cols} {from_sql} {where} {order_sql} LIMIT %s OFFSET %s',
         params + [PER_PAGE, (page-1)*PER_PAGE],
     ).fetchall()
     
@@ -708,24 +718,31 @@ def index():
                            today_str=now.strftime("%Y-%m-%d"))
 
 @app.route("/view")
+@render_cached(ttl=180)
 def view():
     article_id = request.args.get("id", type=int)
     conn = get_db_connection()
-    row = conn.execute("SELECT * FROM articles WHERE id=%s", (article_id,)).fetchone()
+    row = conn.execute(
+        """SELECT a.*, ac.content AS article_content
+           FROM articles a
+           LEFT JOIN article_content ac ON ac.url = a.url
+           WHERE a.id = %s""",
+        (article_id,)
+    ).fetchone()
     if not row:
         return "内容不存在", 404
     
     url, site_key, title = row["url"], row["site_source"], row["title"]
     original_url = url
-    cached = conn.execute("SELECT content FROM article_content WHERE url=%s", (url,)).fetchone()
+    cached_html = row["article_content"]
     content = ""
 
-    if cached and cached['content']:
-        original_url = safe_extract_original_url(cached["content"], fallback_url=url, site_key=site_key)
+    if cached_html:
+        original_url = safe_extract_original_url(cached_html, fallback_url=url, site_key=site_key)
         if site_key == "user" or site_key not in SITES_CONFIG:
-            content = cached["content"]
+            content = cached_html
         else:
-            content = clean_html(cached["content"], site_key)
+            content = clean_html(cached_html, site_key)
     elif site_key in SITES_CONFIG:
         try:
             r = session_req.get(url, timeout=10)
