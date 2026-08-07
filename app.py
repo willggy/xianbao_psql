@@ -46,6 +46,10 @@ app = Flask(__name__)
 if _compress:
     Compress(app)
 
+# ===== 海尼曼点读蓝图挂载（独立 /hnm，不干扰线报逻辑）=====
+from hnm_blue import hnm_bp
+app.register_blueprint(hnm_bp)
+
 # Secrets and runtime config
 SITE_TITLE = "古希腊掌管羊毛的神"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
