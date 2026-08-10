@@ -9,6 +9,19 @@ button { font-family:inherit; border:none; background:none; cursor:pointer; }
 img { display:block; }
 
 /* ===== 通用页头 ===== */
+.tabs {
+  display:flex; background:#fff; border-bottom:1px solid #e5e7eb;
+  position:sticky; top:0; z-index:21;
+}
+.tabs .tab {
+  flex:1; text-align:center; padding:13px 0; font-size:15px; font-weight:600;
+  color:#888; cursor:pointer; border-bottom:2.5px solid transparent;
+}
+.tabs .tab.on { color:#ff6b1a; border-bottom-color:#ff6b1a; }
+.raz-theme .tabs .tab.on { color:#2f7df6; border-bottom-color:#2f7df6; }
+.raz-theme .level-card .lv { color:#2f7df6; }
+.raz-theme .level-card.gk { border-color:#2f7df6; background:linear-gradient(180deg,#f2f7ff,#fff); }
+.raz-theme .mod-icon.read { background:#2f7df6; }
 .topbar {
   height:52px; display:flex; align-items:center; padding:0 14px;
   background:#fff; border-bottom:1px solid #e5e7eb; gap:10px; position:sticky; top:0; z-index:20;

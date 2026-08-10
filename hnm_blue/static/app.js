@@ -4,7 +4,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-const API_BASE = '/hnm';
+const API_BASE = '/hnm';   // 蓝图前缀: Flask 挂载在 /hnm
 
 const API = {
   levels: () => fetch(`${API_BASE}/api/levels`).then(r => r.json()),
@@ -12,24 +12,36 @@ const API = {
   book: id => fetch(`${API_BASE}/api/book/${encodeURIComponent(id)}`).then(r => r.json()),
   quiz: id => fetch(`${API_BASE}/api/quiz/${encodeURIComponent(id)}`).then(r => r.json()),
   dict: id => fetch(`${API_BASE}/api/dict/${encodeURIComponent(id)}`).then(r => r.json()),
+  razLevels: () => fetch(`${API_BASE}/api/raz_levels`).then(r => r.json()),
+  razBooks: lv => fetch(`${API_BASE}/api/raz_books/${encodeURIComponent(lv)}`).then(r => r.json()),
+  razBook: id => fetch(`${API_BASE}/api/raz_book/${encodeURIComponent(id)}`).then(r => r.json()),
 };
 const toast = (msg) => { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; setTimeout(() => t.style.display = "none", 1800); };
-const audioCache = {};
 
+/* 单例音频:复用同一个 Audio 元素,切 src 时旧解码缓冲被浏览器自动释放。
+   避免长用时 new Audio 无限累积导致手机浏览器卡死。 */
+let _audioEl = null;
+let _audioSeq = 0;
 function playAudio(url, rate = 1) {
   return new Promise((resolve) => {
-    let a = audioCache[url];
-    if (!a) { a = new Audio(url); a.preload = "auto"; audioCache[url] = a; }
-    a.playbackRate = rate;
-    a.onended = () => resolve(true);
-    a.onerror = () => { console.warn("audio fail", url); resolve(false); };
-    a.play().catch(() => { console.warn("audio blocked", url); resolve(false); });
+    try {
+      if (!_audioEl) { _audioEl = new Audio(); _audioEl.preload = "auto"; }
+      const a = _audioEl;
+      const seq = ++_audioSeq;
+      a.onended = () => { if (a === _audioEl && seq === _audioSeq) resolve(true); };
+      a.onerror = () => { console.warn("audio fail", url); if (a === _audioEl && seq === _audioSeq) resolve(false); };
+      a.src = url;            // 切换 src:释放上一次的音频缓冲
+      a.playbackRate = rate;
+      a.play().catch(() => { console.warn("audio blocked", url); if (a === _audioEl && seq === _audioSeq) resolve(false); });
+    } catch (e) { resolve(false); }
   });
 }
 
 /* ================= 路由 ================= */
 const routes = {};
 function go(name, ...args) {
+  // 退出点读器时恢复页面滚动(routes.reader 设置了 body overflow:hidden)
+  document.body.style.overflow = "";
   location.hash = "#/" + [name, ...args.map(encodeURIComponent)].join("/");
   // 切换路由时停止所有音频
   if (typeof stopAllAudio === 'function') stopAllAudio();
@@ -38,22 +50,51 @@ function route(fn) {
   const [name, ...args] = location.hash.replace(/^#\//, "").split("/").map(decodeURIComponent);
   (routes[name] || routes.home)(...args);
 }
+/* 统一的"返回书本"跳转: RAZ 书回 razBook 页, 海尼曼书回 book 页 */
+function backBook() {
+  if (window._bookBack) { const [rt, id] = window._bookBack; go(rt, id); }
+  else go("book", window._lastEntry || "");
+}
+window.backBook = backBook;
 window.addEventListener("hashchange", route);
 
 /* ================= 首页: 级别选择 ================= */
+let _curTab = "hnm";   // hnm | raz
+
+function tabBar(active) {
+  return `<div class="tabs">
+    <div class="tab ${active === "hnm" ? "on" : ""}" onclick="switchTab('hnm')">海尼曼</div>
+    <div class="tab ${active === "raz" ? "on" : ""}" onclick="switchTab('raz')">RAZ</div>
+  </div>`;
+}
+function switchTab(t) {
+  _curTab = t;
+  // 直接渲染,不走 go('home')(hash 不变时 hashchange 不触发,页面不会刷新)
+  if (typeof stopAllAudio === 'function') stopAllAudio();
+  routes.home();
+}
+window.switchTab = switchTab;
+
 routes.home = async () => {
-  $("#app").innerHTML = `<div class="topbar"><div class="title">海尼曼分级阅读</div></div><div class="loading">加载中…</div>`;
+  const title = _curTab === "raz" ? "RAZ 分级阅读" : "海尼曼分级阅读";
+  $("#app").innerHTML = `${tabBar(_curTab)}<div class="topbar"><div class="title">${title}</div></div><div class="loading">加载中…</div>`;
   try {
-    const d = await API.levels();
-    const levels = d.levels || [];
-    const def = d.default || "GK";
-    $("#app").innerHTML = `
-      <div class="topbar"><div class="title">海尼曼分级阅读</div><div class="sub">共 ${levels.length} 级</div></div>
+    let levels, def;
+    if (_curTab === "raz") {
+      const d = await API.razLevels();
+      levels = (d || []).map(x => ((x.title || {}).en || "").replace(/级$/, "")).filter(Boolean);
+      def = "AA";
+    } else {
+      const d = await API.levels();
+      levels = d.levels || [];
+      def = d.default || "GK";
+    }
+    $("#app").innerHTML = `${tabBar(_curTab)}<div class="topbar"><div class="title">${title}</div><div class="sub">共 ${levels.length} 级</div></div>
       <div class="level-grid">
         ${levels.map(lv => `
-          <div class="level-card ${lv === def ? "gk" : ""}" onclick="go('books','${esc(lv)}')">
+          <div class="level-card ${lv === def ? "gk" : ""}" onclick="go('${_curTab === "raz" ? "razBooks" : "books"}','${esc(lv)}')">
             <div class="lv">${esc(lv)}</div>
-            <div class="desc">${lv === "GK" ? "启蒙入门" : lv.startsWith("G") ? "进阶绘本" : "分级读物"}</div>
+            <div class="desc">${_curTab === "raz" ? "RAZ 分级读物" : (lv === "GK" ? "启蒙入门" : lv.startsWith("G") ? "进阶绘本" : "分级读物")}</div>
           </div>`).join("")}
       </div>`;
   } catch (e) { $("#app").innerHTML = `<div class="err">加载失败: ${esc(e.message)}</div>`; }
@@ -62,11 +103,10 @@ routes.home = async () => {
 /* ================= 书架 ================= */
 routes.books = async (lv) => {
   window._lastLevel = lv;   // 记录来源级别,供 book 页返回
-  $("#app").innerHTML = `<div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">${esc(lv)} 级</div></div><div class="loading">加载中…</div>`;
+  $("#app").innerHTML = `${tabBar("hnm")}<div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">${esc(lv)} 级</div></div><div class="loading">加载中…</div>`;
   try {
     const books = await API.books(lv);
-    $("#app").innerHTML = `
-      <div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">${esc(lv)} 级</div><div class="sub">${books.length} 本</div></div>
+    $("#app").innerHTML = `${tabBar("hnm")}<div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">${esc(lv)} 级</div><div class="sub">${books.length} 本</div></div>
       <div class="shelf">
         ${books.map(b => {
           const id = (b.json || "").match(/\/entry\/id\/([^/]+)\/huiben/)?.[1] || "";
@@ -80,8 +120,63 @@ routes.books = async (lv) => {
   } catch (e) { $("#app").innerHTML = `<div class="err">加载失败: ${esc(e.message)}</div>`; }
 };
 
+/* ================= RAZ 书架 ================= */
+routes.razBooks = async (lv) => {
+  window._lastLevel = lv;
+  _curTab = "raz";
+  $("#app").innerHTML = `${tabBar("raz")}<div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">RAZ ${esc(lv)} 级</div></div><div class="loading">加载中…</div>`;
+  try {
+    const books = await API.razBooks(lv);
+    $("#app").innerHTML = `${tabBar("raz")}<div class="topbar"><button class="back" onclick="go('home')">‹</button><div class="title">RAZ ${esc(lv)} 级</div><div class="sub">${books.length} 本</div></div>
+      <div class="shelf">
+        ${books.map(b => {
+          const id = (b.json || "").match(/\/entry\/id\/([^/]+)\/ver\/3/)?.[1] || "";
+          const title = b.title?.en || "?";
+          return `<div class="book-card" onclick="go('razBook','${esc(id)}')">
+            <div class="book-cover">${b.cover ? `<img loading="lazy" src="${esc(b.cover)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` : ""}<div class="noimg" style="display:${b.cover ? "none" : "flex"}">${esc(title)}</div></div>
+            <div class="book-title">${esc(title)}</div>
+          </div>`;
+        }).join("")}
+      </div>`;
+  } catch (e) { $("#app").innerHTML = `<div class="err">加载失败: ${esc(e.message)}</div>`; }
+};
+
+/* ================= RAZ 书本: 阅读 + 重点单词 ================= */
+routes.razBook = async (id) => {
+  window._bookBack = ["razBook", id];   // reader/cards 返回目标
+  _curTab = "raz";
+  $("#app").innerHTML = `${tabBar("raz")}<div class="topbar"><button class="back" onclick="go('razBooks', window._lastLevel || 'AA')">‹</button><div class="title">加载中…</div></div>`;
+  try {
+    const d = await API.razBook(id);
+    const title = d.title?.en || "书";
+    const quiz = d.quiz || {};
+    const pages = d.pages || [];
+    const qid = (quiz.json || "").match(/id\/(\d+)/)?.[1] || quiz.quiz_id || "";
+    $("#app").innerHTML = `${tabBar("raz")}<div class="topbar"><button class="back" onclick="go('razBooks', window._lastLevel || 'AA')">‹</button><div class="title">${esc(title)}</div></div>
+      <div class="mod-list">
+        <div class="mod-item" onclick="go('reader','${esc(id)}')">
+          <div class="mod-icon read">📖</div>
+          <div class="mod-body"><div class="mod-name">绘本阅读</div><div class="mod-desc">逐页点读 · ${pages.length} 页</div></div>
+          <div class="mod-lock free">免费</div>
+        </div>
+        ${qid ? `<div class="mod-item" onclick="go('cards','${esc(qid)}','${esc(title)}','${esc(id)}')">
+          <div class="mod-icon cards">★</div>
+          <div class="mod-body"><div class="mod-name">重点单词</div><div class="mod-desc">看图识词 · 点击发音</div></div>
+          <div class="mod-lock free">免费</div>
+        </div>` : ""}
+        ${qid ? `<div class="mod-item" onclick="go('words','${esc(qid)}','${esc(title)}','${esc(id)}')">
+          <div class="mod-icon words">🔤</div>
+          <div class="mod-body"><div class="mod-name">单词听选</div><div class="mod-desc">听发音选词 · 巩固重点单词</div></div>
+          <div class="mod-lock free">免费</div>
+        </div>` : ""}
+      </div>`;
+  } catch (e) { $("#app").innerHTML = `<div class="err">加载失败: ${esc(e.message)}</div>`; }
+};
+
 /* ================= 书本: 四个模块 ================= */
 routes.book = async (id) => {
+  window._lastEntry = id;    // 记录海尼曼当前书,供 reader/cards 返回
+  delete window._bookBack;   // 海尼曼书返回 book 页,不走 razBook
   $("#app").innerHTML = `<div class="topbar"><button class="back" onclick="go('books', window._lastLevel || 'GK')">‹</button><div class="title">加载中…</div></div>`;
   try {
     const d = await API.book(id);
@@ -122,7 +217,7 @@ routes.book = async (id) => {
 
 /* ================= 卡片练习 ================= */
 routes.cards = async (qid, title, bookId) => {
-  $("#app").innerHTML = `<div class="topbar"><button class="back" onclick="go('book','${esc(bookId)}')">‹</button><div class="title">${esc(title || "卡片练习")}</div></div><div class="loading">加载中…</div>`;
+  $("#app").innerHTML = `<div class="topbar"><button class="back" onclick="backBook()">‹</button><div class="title">${esc(title || "卡片练习")}</div></div><div class="loading">加载中…</div>`;
   try {
     const d = await API.quiz(qid);
     const items = Array.isArray(d) ? d : (d.data || []);
@@ -291,9 +386,10 @@ routes.sentence = async (id) => {
 /* ================= 点读器 ================= */
 routes.reader = async (id) => {
   document.body.style.overflow = "hidden";
+  window._lastEntry = id;
   $("#app").innerHTML = `<div class="reader" id="reader">
     <div class="reader-top">
-      <button onclick="go('book','${esc(id)}')">‹ 返回</button>
+      <button onclick="backBook()">‹ 返回</button>
       <div class="rt-title" id="rtTitle"></div>
       <button id="rtTrans" onclick="toggleTrans()">译</button>
       <button id="rtRate" onclick="toggleRate()">1.0x</button>
@@ -310,7 +406,7 @@ routes.reader = async (id) => {
       <button id="nextPg">下一页 ›</button>
       <button class="primary" id="playPg">▶ 朗读</button>
       <button id="autoReadBtn" class="${autoReadOn ? "on" : ""}" onclick="toggleAutoRead()">自动朗读</button>
-      <button id="backPg" onclick="go('book','${esc(id)}')">退出</button>
+      <button id="backPg" onclick="backBook()">退出</button>
     </div>
   </div><div class="toast" id="toast"></div>`;
   try {
@@ -342,10 +438,14 @@ routes.reader = async (id) => {
       fetch(`${API_BASE}/api/dict/${_huibenId}`).then(r => r.json()).then(j => { _dictCache[_huibenId] = j; })
         .catch(() => {});
     }
-    document.addEventListener("keydown", k => {
-      if (k.key === "ArrowRight") flip(1);
-      if (k.key === "ArrowLeft") flip(-1);
-    });
+    // 键盘翻页:模块级只绑定一次,避免重复监听累积
+    if (!window.__keyBound) {
+      window.__keyBound = true;
+      document.addEventListener("keydown", k => {
+        if (k.key === "ArrowRight") flip(1);
+        if (k.key === "ArrowLeft") flip(-1);
+      });
+    }
   } catch (e) {
     $("#reader").innerHTML = `<div class="err">加载失败: ${esc(e.message)}</div>`;
   }
@@ -375,9 +475,12 @@ function buildPage(i) {
   // 图片层
   (pg.images || []).forEach(img => {
     const [x, y, w, h] = (img.rect || "0,0,0,0").split(",").map(Number);
+    // RAZ 占位图 "@bg_white" / "@bg_xxx" = 纯色底,无实际图片文件,跳过
+    const src = img.image || "";
+    if (src.startsWith("@")) return;
     const el = document.createElement("img");
     el.className = "page-img";
-    el.src = baseUrl + img.image;
+    el.src = baseUrl + src;
     el.style.cssText = `left:${x * scale}px;top:${y * scale}px;width:${w * scale}px;height:${h * scale}px;`;
     wrap.appendChild(el);
   });
@@ -470,11 +573,13 @@ function playWordSound(word) {
 }
 
 function stopAllAudio() {
-  // 停止所有正在播放的音频
-  document.querySelectorAll("audio").forEach(a => { a.pause(); a.currentTime = 0; });
-  // 清除所有缓存的 Audio 对象
-  Object.keys(audioCache).forEach(k => {
-    try { audioCache[k].pause(); } catch(e) {}
+  // 单例音频:暂停并清空 src,释放解码缓冲
+  if (_audioEl) {
+    try { _audioEl.pause(); _audioEl.removeAttribute("src"); _audioEl.load(); } catch (e) {}
+  }
+  // 兼容旧 DOM 音频(若有)
+  document.querySelectorAll("audio").forEach(a => {
+    try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {}
   });
 }
 

@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 海尼曼点读 Flask 蓝图 — 挂载到线报项目(app.py) 复用其 gunicorn/flask 实例
-提供 5 个 API 代理 + 静态前端
+提供 8 个 API 代理 + 静态前端 (5 海尼曼 + 3 RAZ)
 访问:  /hnm/            (点读页面首页)
        /hnm/api/levels  (级别)
        /hnm/api/books/<level>
        /hnm/api/book/<id>
        /hnm/api/quiz/<id>
        /hnm/api/dict/<id>
+       /hnm/api/raz_levels   (RAZ 级别)
+       /hnm/api/raz_books/<level>
+       /hnm/api/raz_book/<id>
 """
 import json, time, hashlib, base64, math
 import requests
@@ -80,11 +83,25 @@ def _pick(j):
         return j["data"]
     return j
 
-# ============ 5 个 API ============
+# ============ 8 个 API (5 海尼曼 + 3 RAZ) ============
 @hnm_bp.route("/api/levels")
 def api_levels():
     j = post_json("https://api.xuexd.cn/app/huiben/levels")
     return json.dumps(_pick(j), ensure_ascii=False)
+
+@hnm_bp.route("/api/raz_levels")
+def api_raz_levels():
+    j = post_json("https://api.xuexd.cn/app/book/hnm_raz_levels/ver/3")
+    return json.dumps(_pick(j), ensure_ascii=False)
+
+@hnm_bp.route("/api/raz_books/<level>")
+def api_raz_books(level):
+    d = post_json(f"https://api.xuexd.cn/app/book/hnm_raz_level/level/{level}/ver/3")
+    return json.dumps(_pick(d), ensure_ascii=False)
+
+@hnm_bp.route("/api/raz_book/<path:entry_id>")
+def api_raz_book(entry_id):
+    return json.dumps(post_json(f"https://api.xuexd.cn/app/huiben/entry/id/{entry_id}/ver/3/hui"), ensure_ascii=False)
 
 @hnm_bp.route("/api/books/<level>")
 def api_books(level):
