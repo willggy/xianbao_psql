@@ -44,7 +44,6 @@ gemini_bp = Blueprint(
 )
 sock = Sock()
 
-
 def _get_api_key():
     """
     优先从客户端 query 参数取 key（透传模式），
@@ -54,7 +53,6 @@ def _get_api_key():
     if key:
         return key
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
-
 
 def _relay_c2s(ws, upstream):
     """前端 → Google 转发线程"""
@@ -92,7 +90,6 @@ def _relay_c2s(ws, upstream):
         except Exception:
             pass
 
-
 def _relay_s2c(ws, upstream):
     """Google → 前端 转发线程"""
     try:
@@ -125,14 +122,8 @@ def _relay_s2c(ws, upstream):
         except Exception:
             pass
 
-
-@sock.route("/ws", bp=gemini_bp)
-def gemini_ws(ws):
-    """
-    WebSocket 透明代理端点。
-    客户端在 URL 里带 key: wss://host/gemini/ws?key=AIza...
-    代理透传给 Google，服务端不存 key。
-    """
+def _relay_session(ws):
+    """WebSocket transparent relay. Client passes key in URL."""
     api_key = _get_api_key()
     if not api_key:
         ws.send(json.dumps({"error": "No API key. Pass ?key=AIza... in WebSocket URL"}))
@@ -163,6 +154,15 @@ def gemini_ws(ws):
 
     logger.info("[gemini_ws] session ended")
 
+@sock.route("/ws", bp=gemini_bp)
+def gemini_ws(ws):
+    """wss://host/gemini/ws?key=... endpoint"""
+    _relay_session(ws)
+
+@sock.route("/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")
+def gemini_ws_standard(ws):
+    """Standard Gemini Live path for app default config"""
+    _relay_session(ws)
 
 @gemini_bp.route("/")
 def gemini_index():
