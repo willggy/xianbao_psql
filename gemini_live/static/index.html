@@ -51,7 +51,7 @@ function toggleConn() {
   const key = document.getElementById('key').value.trim();
   if (!key) { log('⚠ 请先填 API Key'); return; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/gemini/ws?key=${enco…(key)}`;
+  const url = `${proto}://${location.host}/gemini/ws?key=${encodeURIComponent(key)}`;
   log('连接中: ' + url.replace(key, key.slice(0,8) + '...'));
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
