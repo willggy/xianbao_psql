@@ -50,6 +50,11 @@ if _compress:
 from hnm_blue import hnm_bp
 app.register_blueprint(hnm_bp)
 
+# ===== Gemini Live WebSocket 代理蓝图挂载（独立 /gemini）=====
+from gemini_live import gemini_bp, sock
+sock.init_app(app)
+app.register_blueprint(gemini_bp)
+
 # Secrets and runtime config
 SITE_TITLE = "古希腊掌管羊毛的神"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()

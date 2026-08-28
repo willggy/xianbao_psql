@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemini Live 代理测试</title>
+<style>
+body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; background: #f9f9f9; }
+h1 { font-size: 20px; }
+#status { padding: 8px 12px; border-radius: 6px; margin: 12px 0; font-size: 14px; }
+.disconnected { background: #fde8e8; color: #c00; }
+.connected { background: #e8f5e9; color: #2e7d32; }
+#log { background: #fff; border: 1px solid #ddd; border-radius: 6px; height: 300px; overflow-y: auto; padding: 12px; font-size: 13px; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+input { width: 100%; padding: 8px; margin: 6px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; margin-right: 8px; }
+.btn-connect { background: #1a73e8; color: #fff; }
+.btn-send { background: #34a853; color: #fff; }
+.btn-clear { background: #eee; }
+label { font-size: 13px; color: #555; }
+</style>
+</head>
+<body>
+<h1>Gemini Live 代理测试</h1>
+<div id="status" class="disconnected">未连接</div>
+<div id="log"></div>
+<label>API Key（拼进 WebSocket URL，服务端不存）</label>
+<input id="key" type="password" placeholder="AIza...">
+<label>消息 JSON</label>
+<input id="msg" value='{"setup": {"model": "models/gemini-2.5-flash-live", "generation_config": {"response_modalities": ["AUDIO"]}}}'>
+<div style="margin-top:8px">
+<button class="btn-connect" onclick="toggleConn()">连接</button>
+<button class="btn-send" onclick="sendMsg()">发送</button>
+<button class="btn-clear" onclick="clearLog()">清空</button>
+</div>
+<script>
+let ws = null;
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+
+function log(msg) {
+  const ts = new Date().toLocaleTimeString();
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(connected) {
+  statusEl.className = connected ? 'connected' : 'disconnected';
+  statusEl.textContent = connected ? '已连接' : '未连接';
+}
+function toggleConn() {
+  if (ws && ws.readyState <= 1) { ws.close(); return; }
+  const key = document.getElementById('key').value.trim();
+  if (!key) { log('⚠ 请先填 API Key'); return; }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/gemini/ws?key=${enco…(key)}`;
+  log('连接中: ' + url.replace(key, key.slice(0,8) + '...'));
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setStatus(true); log('✅ 已连接'); };
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) log(`🔊 收到音频 ${e.data.byteLength} bytes`);
+    else log(`⬅ ${e.data}`);
+  };
+  ws.onclose = () => { setStatus(false); log('❌ 连接关闭'); ws = null; };
+  ws.onerror = () => { log('⚠ 连接错误'); };
+}
+function sendMsg() {
+  if (!ws || ws.readyState !== 1) { log('未连接'); return; }
+  const text = document.getElementById('msg').value;
+  try { ws.send(text); log(`➡ ${text}`); }
+  catch (e) { log('发送失败: ' + e.message); }
+}
+function clearLog() { logEl.textContent = ''; }
+</script>
+</body>
+</html>
