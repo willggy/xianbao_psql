@@ -26,6 +26,10 @@ from flask import Blueprint, send_from_directory, request
 from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 import websocket  # websocket-client
+try:
+    from websocket import WebSocketTimeoutException
+except ImportError:
+    WebSocketTimeoutException = Exception
 
 logger = logging.getLogger("gemini_live")
 
@@ -44,6 +48,7 @@ gemini_bp = Blueprint(
 )
 sock = Sock()
 
+
 def _get_api_key():
     """
     优先从客户端 query 参数取 key（透传模式），
@@ -53,6 +58,18 @@ def _get_api_key():
     if key:
         return key
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+
+
+
+def _upstream_keepalive(upstream, stop_event):
+    """Send WebSocket protocol pings to Google to keep the upstream session alive."""
+    while not stop_event.wait(30):
+        try:
+            upstream.ping("gemini-relay-keepalive")
+        except Exception as e:
+            logger.warning("[keepalive] upstream.ping error: %s", e)
+            break
+
 
 def _relay_c2s(ws, upstream):
     """前端 → Google 转发线程"""
@@ -90,20 +107,27 @@ def _relay_c2s(ws, upstream):
         except Exception:
             pass
 
+
 def _relay_s2c(ws, upstream):
-    """Google → 前端 转发线程"""
+    """Google -> client relay thread with idle timeout tolerance."""
+    consecutive_timeouts = 0
     try:
         while True:
             try:
                 data = upstream.recv()
+                consecutive_timeouts = 0
+            except WebSocketTimeoutException:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= 2:
+                    logger.warning("[s2c] upstream idle timeout after keepalive, closing")
+                    break
+                continue
             except Exception as e:
                 logger.warning("[s2c] upstream.recv error: %s", e)
                 break
             if data is None or len(data) == 0:
                 break
             try:
-                # simple_websocket: ws.send() 自动根据 data 类型选帧
-                # bytes → 二进制帧（音频），str → 文本帧（JSON）
                 ws.send(data)
             except ConnectionClosed:
                 break
@@ -122,6 +146,7 @@ def _relay_s2c(ws, upstream):
         except Exception:
             pass
 
+
 def _relay_session(ws):
     """WebSocket transparent relay. Client passes key in URL."""
     api_key = _get_api_key()
@@ -138,6 +163,7 @@ def _relay_session(ws):
             timeout=30,
             enable_multithread=True,
         )
+        upstream.settimeout(120)
     except Exception as e:
         ws.send(json.dumps({"error": f"Failed to connect upstream: {e}"}))
         ws.close()
@@ -145,19 +171,27 @@ def _relay_session(ws):
 
     logger.info("[gemini_ws] upstream connected, starting relay threads")
 
+    stop_event = threading.Event()
+    t_keepalive = threading.Thread(target=_upstream_keepalive, args=(upstream, stop_event), daemon=True)
     t_c2s = threading.Thread(target=_relay_c2s, args=(ws, upstream), daemon=True)
     t_s2c = threading.Thread(target=_relay_s2c, args=(ws, upstream), daemon=True)
+    t_keepalive.start()
     t_c2s.start()
     t_s2c.start()
-    t_c2s.join()
-    t_s2c.join()
+    try:
+        t_c2s.join()
+        t_s2c.join()
+    finally:
+        stop_event.set()
 
     logger.info("[gemini_ws] session ended")
+
 
 @sock.route("/ws", bp=gemini_bp)
 def gemini_ws(ws):
     """wss://host/gemini/ws?key=... endpoint"""
     _relay_session(ws)
+
 
 @sock.route("/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")
 def gemini_ws_standard(ws):
