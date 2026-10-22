@@ -145,7 +145,7 @@
         }
 
 
-        /* 附加信息 */
+        /* 附加信息 / 评论区 */
         #art-fujia {
             margin-top: 25px;
             padding: 18px;
@@ -155,12 +155,155 @@
         }
 
         #art-fujia::before {
-            content: "📢 附加内容 / 附件";
+            content: "💬 评论 / 附加内容";
             display: block;
             font-size: 14px;
             color: #007aff;
             font-weight: bold;
             margin-bottom: 12px;
+        }
+
+        /* 源站自带的抓取时间戳，压成小字弱化 */
+        #art-fujia .mianbaoxie,
+        #art-fujia .upd-sub {
+            font-size: 0.78rem;
+            color: #9aa6b8;
+        }
+
+        /* 线报酷评论：div.ul > div.li > div.clbody */
+        #art-fujia .ul {
+            margin: 0;
+            padding: 0;
+        }
+
+        #art-fujia .li {
+            list-style: none;
+            padding: 10px 0;
+            border-top: 1px solid #e6eefc;
+        }
+
+        #art-fujia .li:first-child {
+            border-top: 0;
+        }
+
+        #art-fujia .cinfo {
+            margin-bottom: 6px;
+            font-size: 0.85rem;
+            color: #7a8699;
+            line-height: 1.6;
+        }
+
+        #art-fujia .cinfo .author a {
+            color: #007aff;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        #art-fujia .cinfo .c-time,
+        #art-fujia .cinfo .c-ip,
+        #art-fujia .cinfo .cmt-fl {
+            margin-left: 8px;
+        }
+
+        #art-fujia .cinfo .cmt-fl {
+            color: #b0bac9;
+        }
+
+        #art-fujia .c-neirong {
+            font-size: 1rem;
+            color: #333;
+            line-height: 1.7;
+        }
+
+        /* 楼中楼回复 */
+        #art-fujia .c-dianping {
+            margin-top: 8px;
+            padding: 6px 0 6px 10px;
+            border-left: 3px solid #d0e3ff;
+            font-size: 0.9rem;
+            color: #5c6b80;
+        }
+
+        #art-fujia .c-dianping .dianpingming a {
+            color: #007aff;
+            text-decoration: none;
+        }
+
+        #art-fujia .c-dianping .dianpingshijian {
+            margin-left: 8px;
+            color: #9aa6b8;
+        }
+
+        /* xianbao.icu 评论卡片（Element Plus 结构，源站 CSS 不在了） */
+        .article-content .el-card.comment {
+            margin-top: 24px;
+            padding: 14px 16px;
+            background: var(--fujia-bg);
+            border: 1px dashed var(--fujia-border);
+            border-radius: 12px;
+            font-size: 0.95rem;
+            color: #333;
+        }
+
+        .article-content .el-card.comment .el-card__body {
+            padding: 0 !important;
+        }
+
+        /* el-space 的 display:flex 来自 Element Plus 的样式表，这里没加载，
+           不补的话昵称 / 时间 / 楼层会上下堆叠成好几行 */
+        .article-content .el-space {
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .article-content .el-space--horizontal {
+            flex-direction: row;
+        }
+
+        .article-content .el-space--vertical {
+            flex-direction: column;
+        }
+
+        .article-content .el-space__item {
+            display: block;
+            min-width: 0;
+        }
+
+        /* 评论头像不要：抓取时已经删掉了（_drop_comment_avatars），
+           这里再兜一层 —— 覆盖那些抓取于修复之前、缓存里仍带头像的老文章。
+           线报酷的头像是文字（名字首字母），留着会变成昵称前一个孤字。 */
+        .article-content .el-avatar,
+        .article-content .pingluntoux,
+        .article-content .xb-cmtav,
+        .article-content .el-avatar img {
+            display: none !important;
+        }
+
+        .article-content .el-card.comment .el-text--info {
+            color: #9aa6b8;
+            font-size: 0.82rem;
+        }
+
+        /* 表格兜底：源站线报常带表格，不设样式会溢出容器 */
+        .article-content table {
+            display: block;
+            width: 100%;
+            max-width: 100%;
+            overflow-x: auto;
+            border-collapse: collapse;
+            margin: 16px 0;
+        }
+
+        .article-content th,
+        .article-content td {
+            border: 1px solid #e3e8ef;
+            padding: 6px 10px;
+            font-size: 0.95rem;
+        }
+
+        .article-content th {
+            background: #f6f8fb;
+            font-weight: 600;
         }
 
         /* 图片放大模态框 */
@@ -284,6 +427,10 @@
             // 监听正文区所有图片点击
             articleContent.addEventListener('click', function (e) {
                 if (e.target.tagName === 'IMG') {
+                    // 头像等小图不放大，否则点一下会弹出个 40px 的头像
+                    if (e.target.clientWidth && e.target.clientWidth < 80) {
+                        return;
+                    }
                     modal.classList.add('active');
                     modalImg.src = e.target.src;
                     modalImg.alt = e.target.alt || "放大图片";

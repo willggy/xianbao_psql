@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>古希腊掌管羊毛的神</title>
     <link href="https://lib.baomitu.com/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://lib.baomitu.com/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
@@ -21,9 +21,6 @@
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
             padding-bottom: 30px;
-        }
-
-        body {
             --featured-pill-bg: #f7e4bf;
             --featured-pill-text: #704315;
             --featured-pill-border: #dfaa54;
@@ -222,6 +219,49 @@
         }
 
 
+        /* 银行/分类小标签：match_keyword 后端已经查出来了，直接展示 */
+        .badge-bank {
+            display: inline-block;
+            font-size: 10px;
+            line-height: 1.5;
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-right: 6px;
+            vertical-align: 1px;
+            color: var(--ios-blue);
+            background: rgba(0, 122, 255, 0.1);
+            font-weight: 600;
+            max-width: 96px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* 有新线报时的提示条：不再强制 reload，点一下才刷新 */
+        .new-items {
+            display: flex;
+            justify-content: center;
+            padding: 10px 16px 0;
+        }
+
+        .new-items[hidden] {
+            display: none;
+        }
+
+        .new-items a {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 16px;
+            border-radius: 999px;
+            background: var(--ios-blue);
+            color: #fff !important;
+            font-size: 13px;
+            font-weight: 500;
+            text-decoration: none !important;
+            box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35);
+        }
+
         .item-time {
             font-size: 12px;
             color: var(--text-sub);
@@ -248,12 +288,12 @@
                     </button>
                     <ul class="dropdown-menu">
                         {% for bank in bank_list %}
-                        <li><a class="dropdown-item" href="/?tag={{ bank }}">{{ bank }}</a></li>
+                        <li><a class="dropdown-item" href="/?tag={{ bank|urlencode }}">{{ bank }}</a></li>
                         {% endfor %}
                     </ul>
                 </div>
 
-                <a href="/?tag=羊毛精选" class="nav-pill nav-pill-featured {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
+                <a href="/?tag={{ '羊毛精选'|urlencode }}" class="nav-pill nav-pill-featured {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
 
                 <button class="nav-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchCollapse">
                     <i class="bi bi-search"></i>
@@ -273,6 +313,11 @@
     </header>
 
     <div class="list-container">
+        <div class="new-items" id="newItems" hidden>
+            <a href="#" id="newItemsLink">
+                <i class="bi bi-arrow-up-circle"></i> 有新线报了，点击刷新
+            </a>
+        </div>
         <div class="refresh-bar">
             <i class="bi bi-clock-history"></i>
             每 2 分钟自动刷新，下次刷新：<span class="time-highlight" id="nextRefresh">{{ next_refresh_time }}</span>
@@ -284,6 +329,7 @@
             <div class="item-title">
                 {% if article.is_top %}<span class="badge-top">置顶</span>{% endif %}
                 {% if article.is_featured and current_tag != '羊毛精选' %}<span class="badge-featured">精选</span>{% endif %}
+                {% if article.match_keyword %}<span class="badge-bank">{{ article.match_keyword }}</span>{% endif %}
                 {{ article.title }}
             </div>
             <div class="item-time">
@@ -298,19 +344,26 @@
         </a>
         {% endfor %}
         {% else %}
-        <div class="text-center py-5 text-muted">暂无数据</div>
+        <div class="text-center py-5 text-muted">
+            {% if q or current_tag %}
+                <div>没有匹配「{{ q or current_tag }}」的线报</div>
+                <a href="/" class="nav-pill mt-3" style="display: inline-block;">看全部</a>
+            {% else %}
+                暂无数据
+            {% endif %}
+        </div>
         {% endif %}
     </div>
 
     {% if total_pages > 1 %}
     <div class="d-flex justify-content-center gap-3 py-4">
         {% if current_page > 1 %}
-        <a href="/?page={{ current_page - 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}"
+        <a href="/?page={{ current_page - 1 }}{% if current_tag %}&tag={{ current_tag|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}"
             class="nav-pill">上一页</a>
         {% endif %}
         <span class="small text-muted align-self-center">{{ current_page }} / {{ total_pages }}</span>
         {% if current_page < total_pages %}
-        <a href="/?page={{ current_page + 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}"
+        <a href="/?page={{ current_page + 1 }}{% if current_tag %}&tag={{ current_tag|urlencode }}{% endif %}{% if q %}&q={{ q|urlencode }}{% endif %}"
             class="nav-pill">下一页</a>
         {% endif %}
     </div>
@@ -320,43 +373,98 @@
     <span id="latestArticleId" data-id="{{ latest_id }}" style="display:none;"></span>
     <script src="https://lib.baomitu.com/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
     <script>
-        // 获取初始 ID (转换为数字)
-        var latestId = parseInt(document.getElementById('latestArticleId').dataset.id) || 0;
+        // 获取初始 ID（与 /api/check_update 同口径：当前筛选下的最新一篇文章 id）
+        var latestId = parseInt(document.getElementById('latestArticleId').dataset.id, 10) || 0;
+
         // 页面可见性检测
         var isPageVisible = true;
-        document.addEventListener("visibilitychange", function () {
-            isPageVisible = !document.hidden;
-        });
 
-        // 下次刷新时间由浏览器本地计算，不依赖服务端渲染，
-        // 这样页面开着不动时倒计时也会一直准确（服务端值只作为无 JS 兜底）。
         var REFRESH_PERIOD_MS = 120000; // 与服务端 2 分钟刷新边界保持一致
         var nextRefreshEl = document.getElementById('nextRefresh');
+        var banner = document.getElementById('newItems');
+        var bannerLink = document.getElementById('newItemsLink');
 
+        // 下一个 2 分钟边界的时间戳。用 Date.now() 取模，和北京时间对齐
+        // （UTC+8 是整小时偏移，分钟边界一致）。
+        function nextBoundaryTs() {
+            return Math.ceil((Date.now() + 1) / REFRESH_PERIOD_MS) * REFRESH_PERIOD_MS;
+        }
+
+        // 倒计时：原来只显示时刻，用户还得自己算还剩多久，这里带上剩余秒数。
         function updateNextRefreshLabel() {
             if (!nextRefreshEl) return;
-            var next = new Date(Math.ceil((Date.now() + 1) / REFRESH_PERIOD_MS) * REFRESH_PERIOD_MS);
+            var ts = nextBoundaryTs();
+            var next = new Date(ts);
             var hh = String(next.getHours()).padStart(2, '0');
             var mm = String(next.getMinutes()).padStart(2, '0');
-            nextRefreshEl.textContent = hh + ':' + mm;
+            var secs = Math.max(0, Math.round((ts - Date.now()) / 1000));
+            nextRefreshEl.textContent = hh + ':' + mm + '（还有 ' + secs + ' 秒）';
         }
-        updateNextRefreshLabel();
-        setInterval(updateNextRefreshLabel, 10000);
 
-        // 每 120 秒检查一次
-        setInterval(function () {
-            // 只有当用户正在看页面时，才去服务器检查更新
-            if (!isPageVisible) return;
-
-            fetch('/api/check_update')
+        function checkUpdate() {
+            if (!isPageVisible || !banner) return;
+            // 带上当前 query，接口才能按同样的筛选条件算「最新 id」，
+            // 否则在 tag/q 视图下会永远判定为「有更新」。
+            fetch('/api/check_update' + window.location.search)
                 .then(function (res) { return res.json(); })
                 .then(function (data) {
-                    if (data.last_id > latestId) {
-                        location.reload();
+                    if (data && data.last_id > latestId) {
+                        latestId = data.last_id;
+                        banner.hidden = false;
                     }
                 })
                 .catch(function (err) { console.log("检查更新失败"); });
-        }, 120000); 
+        }
+
+        // 轮询对齐到刷新边界，而不是从页面加载那一刻起每 120 秒一次。
+        // 边界后再多等 25 秒：cron 正是在边界触发的，抓取本身要几秒到几十秒，
+        // 查太早只会扑空，白付一次请求。
+        function scheduleLoop() {
+            var delay = nextBoundaryTs() - Date.now() + 25000;
+            setTimeout(function () {
+                checkUpdate();
+                scheduleLoop();
+            }, Math.max(1000, delay));
+        }
+
+        updateNextRefreshLabel();
+        setInterval(updateNextRefreshLabel, 1000);
+        scheduleLoop();
+
+        // 回到前台时补查一次，避免切走期间漏掉轮询
+        document.addEventListener("visibilitychange", function () {
+            isPageVisible = !document.hidden;
+            if (isPageVisible) checkUpdate();
+        });
+
+        // 点提示条才刷新，并且记住滚动位置（不再强制 reload 打断阅读）
+        if (bannerLink) {
+            bannerLink.addEventListener('click', function (e) {
+                e.preventDefault();
+                try {
+                    sessionStorage.setItem('homeScroll', String(window.scrollY));
+                } catch (err) {}
+                location.reload();
+            });
+        }
+
+        try {
+            var savedScroll = sessionStorage.getItem('homeScroll');
+            if (savedScroll !== null) {
+                sessionStorage.removeItem('homeScroll');
+                var y = parseInt(savedScroll, 10) || 0;
+                requestAnimationFrame(function () { window.scrollTo(0, y); });
+            }
+        } catch (err) {}
+
+        // 展开搜索栏后自动聚焦，省一次点击
+        var searchCollapse = document.getElementById('searchCollapse');
+        if (searchCollapse) {
+            searchCollapse.addEventListener('shown.bs.collapse', function () {
+                var input = searchCollapse.querySelector('input[name="q"]');
+                if (input) input.focus();
+            });
+        }
     </script>
 </body>
 

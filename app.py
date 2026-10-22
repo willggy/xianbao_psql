@@ -31,7 +31,7 @@ try:
     _compress = True
 except Exception:
     _compress = False
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from waitress import serve
 
 try:
@@ -144,7 +144,9 @@ SITES_CONFIG = {
         "domain": "https://xianbao.icu",
         "list_url": "https://xianbao.icu/xianbao",  
         "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
-        "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text",
+        # .el-card.comment 是评论块，位于 .xianbao-content 的兄弟节点
+        # （同属 div.el-card__body），不显式指定就完全抓不到。
+        "content_selector": ".xianbao-content, .el-card.comment, .article-content, .prose, .entry-content, .post-body, .detail-body, .markdown, .article-detail",
         "scrape_interval_min": 0,
         "max_items_per_run": 40,
         "original_url_selectors": [
@@ -259,6 +261,17 @@ _template_cache_order = []
 _template_cache_lock = threading.Lock()
 PAGE_CACHE_TTL = 30  # seconds
 PAGE_CACHE_MAX = 500
+
+def invalidate_page_cache():
+    """清空首页/详情页的 HTML 缓存。
+
+    新文章入库后必须调用：否则用户点了「有新线报」刷新，
+    拿到的仍是 TTL 内的旧页面，看起来像刷新没生效。
+    """
+    with _template_cache_lock:
+        _template_cache.clear()
+        _template_cache_order.clear()
+
 
 def render_cached(ttl=PAGE_CACHE_TTL):
     def decorator(f):
@@ -506,19 +519,95 @@ TRUSTED_IMAGE_HOSTS = {
     "pic.xiaodigu.cn",
 }
 
+# 裸 URL 识别：排除空白、引号、尖括号，以及 CJK 标点/汉字/全角字符，
+# 这样 "https://a.com/x。下一句" 不会把中文吞进链接里。
+_BARE_URL_RE = re.compile(
+    r"""https?://[^\s<>"'\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]+"""
+)
+_URL_TRAILING = ".,;:!?"
+
+# 这些容器里的文本不做链接化：已有链接不能嵌套，代码块要保持原样。
+_LINKIFY_SKIP_TAGS = {"a", "script", "style", "pre", "code", "textarea"}
+
+
+def _linkify_urls(soup):
+    """把正文纯文本里的裸 URL 变成可点击链接。
+
+    原来是用 re.sub 扫整段 HTML，且要求 URL 前面必须是半角 ':' 或 '?'。
+    但源站写的是中文全角冒号「来源网址：https://…」，匹配不上，于是：
+      - 半角冒号 / 源站自带的 <a>  -> 能点
+      - 全角冒号 / 行首裸链接      -> 点不了
+    这就是「有的能点有的不能点」。改成在文本节点上处理：
+    不依赖前面的标点，也不会误伤标签属性里的 URL。
+    """
+    for node in list(soup.find_all(string=True)):
+        parent = getattr(node, "parent", None)
+        if parent is None or getattr(parent, "name", "") in _LINKIFY_SKIP_TAGS:
+            continue
+        text = str(node)
+        if "://" not in text:
+            continue
+        urls = _BARE_URL_RE.findall(text)
+        if not urls:
+            continue
+        parts = _BARE_URL_RE.split(text)
+        new_nodes = []
+        for i, chunk in enumerate(parts):
+            if chunk:
+                new_nodes.append(NavigableString(chunk))
+            if i >= len(urls):
+                continue
+            raw_url = urls[i]
+            href = raw_url.rstrip(_URL_TRAILING)
+            if not href:
+                new_nodes.append(NavigableString(raw_url))
+                continue
+            a_tag = soup.new_tag("a")
+            a_tag["href"] = href
+            a_tag.string = href
+            new_nodes.append(a_tag)
+            tail = raw_url[len(href):]
+            if tail:
+                new_nodes.append(NavigableString(tail))
+        if not new_nodes:
+            continue
+        try:
+            node.replace_with(*new_nodes)
+        except Exception:
+            continue
+
+
+# 评论头像：抓取时直接丢掉。
+# 线报酷是「文字头像」<span class="pingluntoux xb-cmtav">不</span>，
+# 源站 CSS 不在我们这边，它会渲染成昵称前一个多余的孤字（"不 不知道叫什么3232"）；
+# icu 是图片头像，40px 尺寸同样依赖 Element Plus 的样式表，
+# 丢了之后会被 .article-content img 撑成正文宽度的 72%。
+_COMMENT_AVATAR_SELECTORS = (".pingluntoux", ".xb-cmtav", ".el-avatar")
+
+
+def _drop_comment_avatars(soup):
+    removed = 0
+    for sel in _COMMENT_AVATAR_SELECTORS:
+        try:
+            els = soup.select(sel)
+        except Exception:
+            continue
+        for el in els:
+            el.decompose()
+            removed += 1
+    # 头像所在的 flex 单元被拆空后，留着会多出一段 column-gap 的缩进
+    for el in soup.select(".el-space__item"):
+        if not el.get_text(strip=True) and not el.find_all(True):
+            el.decompose()
+    return removed
+
+
 def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
-    # Convert plain URL after a colon (e.g. "????: https://...") into links.
-    html_content = re.sub(
-        r'([:?]\s*)(https?://[^\s<"]+)',
-        r'\1<a href="\2" target="_blank" rel="noopener noreferrer" style="color:#007aff; text-decoration:underline; word-break:break-all;">\2</a>',
-        html_content,
-        flags=re.IGNORECASE,
-    )
-
     soup = BeautifulSoup(html_content, "lxml")
+    _drop_comment_avatars(soup)
 
     site_cfg = SITES_CONFIG.get(site_key, {})
     site_domain = site_cfg.get("domain", "")
@@ -536,6 +625,9 @@ def clean_html(html_content, site_key):
         code_tag.string = "\n".join(tokens)
         pre_tag.append(code_tag)
         text_node.replace_with(pre_tag)
+
+    # 命令 token 先包进 <pre>（不会被链接化），再统一把裸 URL 变成链接。
+    _linkify_urls(soup)
 
     for tag in soup.find_all(True):
 
@@ -594,11 +686,28 @@ def clean_html(html_content, site_key):
             else:
                 proxy_url = "/img_proxy?url=" + quote(src, safe=':/?%')
 
-            tag.attrs = {
-                'src': proxy_url,
-                'loading': 'lazy',
-                'style': 'max-width:100%; height:auto; border-radius:8px; margin:10px 0;'
-            }
+            # 头像这类小图必须单独处理：detail.html 里 .article-content img
+            # 会把图片撑到正文宽度的 72%，40px 的评论头像会被放大成整幅大图。
+            is_avatar = False
+            for ancestor in list(tag.parents)[:4]:
+                if any("avatar" in str(c).lower() for c in (ancestor.get("class") or [])):
+                    is_avatar = True
+                    break
+
+            if is_avatar:
+                img_style = ("width:40px; height:40px; border-radius:50%; object-fit:cover;"
+                             " display:inline-block; margin:0 8px 0 0; vertical-align:middle;")
+            else:
+                # 只留必要的兜底样式。原来这里还写死了 border-radius / margin:10px 0，
+                # 内联样式优先级高于 CSS，会把 detail.html 里 .article-content img
+                # 的 margin:20px auto（居中）和 12px 圆角整个覆盖掉，图片一直不居中。
+                img_style = "max-width:100%; height:auto;"
+
+            new_attrs = {'src': proxy_url, 'loading': 'lazy', 'style': img_style}
+            alt_text = (tag.get('alt') or '').strip()
+            if alt_text:
+                new_attrs['alt'] = alt_text[:120]
+            tag.attrs = new_attrs
 
         # Link handling
         elif tag.name == 'a':
@@ -625,10 +734,77 @@ def clean_html(html_content, site_key):
                 'style': 'color:#007aff; text-decoration:underline; word-break:break-all;'
             }
 
-    # Capture output before releasing the soup tree.
-    result = str(soup)
+    # 用 body 内容返回片段：str(soup) 会带出 lxml 补的 <html><body> 外壳，
+    # 这段 HTML 最终是被塞进 <div class="article-content"> 里的，
+    # 嵌套的 html/body 虽然会被浏览器忽略，但属于脏输出且白白撑大缓存体积。
+    body = soup.body
+    result = body.decode_contents() if body is not None else str(soup)
     soup.decompose()
     return result
+
+
+# ===== 正文抓取辅助 =====
+# 源站改版后经常出现「正文选择器 MISS、但来源块选择器还在」的情况，
+# 这时如果照旧写库，就会把一行「来源网址：xxx」当成整篇文章缓存下来。
+
+_BOILERPLATE_RE = re.compile(
+    r"^(来源网址|原文链接|原文地址|来源地址|免责声明|本文由系统自动重新抓取)"
+)
+_PUNCT_RE = re.compile(r"[\s:：,，。.、;；|()（）\[\]<>\-—_/\\]+")
+
+
+def _is_boilerplate_only(html_content) -> bool:
+    """判断片段是否只是模板文字（来源网址 / 免责声明），而不是真正正文。
+
+    不能用「总长度」判断：脏数据里常带一条很长的 URL，
+    「来源网址：https://...」总长可能七八十字，但没有任何实质内容。
+    所以这里先剥掉标签和 URL，再看还剩多少真文字。
+    """
+    if not html_content:
+        return True
+    try:
+        text = BeautifulSoup(html_content, "html.parser").get_text(" ", strip=True)
+    except Exception:
+        return False
+    if not text:
+        return True
+    if len(text) > 300:  # 这么长不可能是纯模板文字
+        return False
+    m = _BOILERPLATE_RE.match(text)
+    if not m:
+        return False
+    rest = re.sub(r"https?://\S+", "", text[m.end():])
+    return len(_PUNCT_RE.sub("", rest)) < 10
+
+
+def _collect_content_nodes(soup, selectors):
+    """按顺序收集命中节点，跳过已被外层命中节点包含的子节点。
+
+    配置里常写多个选择器兜底（例如 div.xianbao-content, .article-content），
+    后者往往是前者的子节点，直接 join 会把正文重复拼接一遍。
+
+    允许直接传逗号分隔的字符串：否则传成 str 时 for 会逐字符迭代，
+    "a"/"b"/"p" 这类字母会被当成标签名命中 <a>/<b>/<p>，静默产出垃圾正文。
+    """
+    if isinstance(selectors, str):
+        selectors = selectors.split(",")
+    picked = []
+    for sel in selectors:
+        sel = sel.strip()
+        if not sel:
+            continue
+        try:
+            node = soup.select_one(sel)
+        except Exception:
+            continue
+        if node is None:
+            continue
+        if any(node is p or p in node.parents for p in picked):
+            continue
+        if not node.get_text(strip=True) and not node.select("img"):
+            continue
+        picked.append(node)
+    return picked
 
 
 
@@ -752,6 +928,31 @@ def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精�
 # 3. Routes
 # ==========================================
 
+def _latest_article_id(conn, tag=None, q=None):
+    """当前视图下「最新一篇文章」的 id，供前端判断有没有新内容。
+
+    必须和 /api/check_update 用完全相同的口径：之前 index() 传的是
+    当前排序结果的第一条（有置顶/筛选/翻页时并不是最大 id），
+    而接口返回全表最大 id，两者永远不相等 -> 首页每 2 分钟无限 reload。
+    """
+    if q:
+        # 搜索要扫 article_content.content，%kw% 用不上索引；
+        # 每 2 分钟一次的轮询不值得付这个钱，退化成全局最新。
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM articles").fetchone()
+    elif tag == "羊毛精选":
+        row = conn.execute(
+            "SELECT id FROM articles WHERE is_featured = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    elif tag:
+        row = conn.execute(
+            "SELECT id FROM articles WHERE match_keyword = %s ORDER BY id DESC LIMIT 1",
+            (tag,),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
+    return (row or {}).get("id", 0) or 0
+
+
 @app.route('/')
 @render_cached()
 def index():
@@ -813,6 +1014,8 @@ def index():
             total = conn.execute(total_sql, params[:-1]).fetchone()["count"]
         else:
             total = conn.execute(f'SELECT COUNT(*) {from_sql} {where}', params).fetchone()["count"]
+
+        latest_id = _latest_article_id(conn, tag, q)
     finally:
         close_db_connection(conn)
 
@@ -824,7 +1027,7 @@ def index():
                            q=q, 
                            current_page=page, 
                            total_pages=(total+PER_PAGE-1)//PER_PAGE,
-                           latest_id=articles[0]['id'] if articles else 0,
+                           latest_id=latest_id,
                            today_str=now.strftime("%Y-%m-%d"))
 
 @app.route("/view")
@@ -846,6 +1049,11 @@ def view():
         url, site_key, title = row["url"], row["site_source"], row["title"]
         original_url = url
         cached_html = row["article_content"]
+        if cached_html and site_key in SITES_CONFIG and _is_boilerplate_only(cached_html):
+            # 历史脏数据：库里只存了「来源网址 / 免责声明」一行。
+            # 当作没有缓存，走实时抓取并覆盖这一行，实现访问即自愈。
+            print(f"[CONTENT HEAL] 丢弃疑似脏缓存: {url}")
+            cached_html = None
         content = ""
 
         if cached_html:
@@ -860,65 +1068,28 @@ def view():
                 r.encoding = 'utf-8'
                 soup = BeautifulSoup(r.text, "html.parser")
 
-                # Use two precise containers for xianbao_icu.
-                if site_key == "xianbao_icu":
-                    content_parts = []
+                selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
+                content_nodes = _collect_content_nodes(soup, selectors)
 
-                    # Main article body.
-                    node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
-                    if node1:
-                        content_parts.append(str(node1))
-
-                    # Source / supplement block.
-                    node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
-                    if node2:
-                        content_parts.append(str(node2))
-
-                    if content_parts:
-                        # Join both blocks with a visible separator.
-                        full_raw_content = "<br><br>".join(content_parts)
-
-                        # Clean common spacing noise.
-                        full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
-
-                        # Turn source labels plus URLs into clickable links.
-                        full_raw_content = re.sub(
-                            r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
-                            r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
-                            full_raw_content,
-                            flags=re.IGNORECASE | re.MULTILINE
-                        )
-
-                        conn.execute(
-                            "INSERT INTO article_content(url, content) VALUES(%s, %s) "
-                            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
-                            (url, full_raw_content),
-                        )
-                        conn.commit()
-                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
-                        content = clean_html(full_raw_content, site_key)
-                    else:
-                        content = "暂无核心内容"
-                else:
-                    # Keep the generic logic for other sites.
-                    selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
-                    content_nodes = []
-                    for sel in selectors:
-                        node = soup.select_one(sel.strip())
-                        if node: content_nodes.append(str(node))
-
-                    if content_nodes:
-                        full_raw_content = "".join(content_nodes)
-                        conn.execute(
-                            "INSERT INTO article_content(url, content) VALUES(%s, %s) "
-                            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
-                            (url, full_raw_content),
-                        )
-                        conn.commit()
-                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
-                        content = clean_html(full_raw_content, site_key)
-                    else:
+                if content_nodes:
+                    full_raw_content = "".join(str(n) for n in content_nodes)
+                    if _is_boilerplate_only(full_raw_content):
+                        # 正文选择器已失效，只抓到「来源网址 / 免责声明」这类模板文字。
+                        # 不写库，避免把模板文字当成正文长期缓存下来。
+                        print(f"[CONTENT MISS] {site_key} 未抓到有效正文: {url}")
                         content = "暂无内容"
+                    else:
+                        conn.execute(
+                            "INSERT INTO article_content(url, content) VALUES(%s, %s) "
+                            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+                            (url, full_raw_content),
+                        )
+                        conn.commit()
+                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
+                        content = clean_html(full_raw_content, site_key)
+                else:
+                    print(f"[CONTENT MISS] {site_key} 无选择器命中: {url}")
+                    content = "暂无内容"
 
             except Exception as e:
                 print(f"Error fetching content: {e}")
@@ -1310,12 +1481,13 @@ def show_logs():
 @app.route('/api/check_update')
 def check_update():
     """Lightweight polling endpoint used by the homepage."""
+    tag = request.args.get('tag')
+    q = request.args.get('q')
     conn = get_db_connection()
     try:
-        row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
+        return {"last_id": _latest_article_id(conn, tag, q)}
     finally:
         close_db_connection(conn)
-    return {"last_id": row['id'] if row else 0}
 
 
 @app.route('/img_proxy')
@@ -1745,13 +1917,43 @@ def keyword_match_in_title(title, keywords):
 def any_keyword_match_in_title(title, keywords):
     return keyword_match_in_title(title, keywords) is not None
 
-def fetch_site_candidates(skey, cfg, last_seen_url):
+
+# 列表页里混着的栏目 / 分页 / 登录页，不是文章详情页。
+# 例：iehou 列表里「24小时热门」指向 /page-dayhot.htm，标题够长会被当成文章。
+_NON_ARTICLE_PATH_RE = re.compile(
+    r"^/(?:page-[^/]*\.htm|index(?:-\d+)?\.htm|user-[^/]*\.htm|portal/)",
+    re.IGNORECASE,
+)
+
+
+def _is_non_article_url(url):
+    """判断链接是不是列表页里的导航/分页/栏目页，而不是文章。"""
+    try:
+        path = urlparse(url).path or "/"
+    except Exception:
+        return False
+    if path in ("", "/"):
+        return True
+    return bool(_NON_ARTICLE_PATH_RE.match(path))
+
+
+def fetch_site_candidates(skey, cfg, last_seen_url, url_black=None, title_black=None,
+                          known_urls=None):
+    # 黑名单必须在「截断到 max_items_per_run 之前」生效。
+    # new.xianbao.fun 首页 101 条里有 80 条是 /haodan/ 灌水帖，
+    # 若等到入库前才过滤，40 个候选名额会被全部吃掉，
+    # 真正想要的线报被挤出窗口后，下一轮 last_seen_url 已越过它，就永久抓不到了。
+    url_black = url_black or []
+    title_black = title_black or []
+    known_urls = known_urls or set()
+
     result = {
         "site_key": skey,
         "site_name": cfg.get("name", skey),
         "candidates": [],
         "last_seen_url": last_seen_url or "",
         "matched_items": 0,
+        "candidate_count": 0,
         "status": "ok",
     }
 
@@ -1804,17 +2006,33 @@ def fetch_site_candidates(skey, cfg, last_seen_url):
 
             href = a.get("href", "")
             url = href if href.startswith("http") else (cfg["domain"] + (href if href.startswith("/") else "/" + href))
+            if _is_non_article_url(url):
+                # 导航/分页/栏目页：不能让它参与候选，更不能成为 last_seen_url
+                continue
+            if url_black and any(b in url for b in url_black):
+                continue
+            if title_black and any_keyword_match_in_title(title, title_black):
+                continue
             if not newest_url:
                 newest_url = url
                 result["last_seen_url"] = newest_url
 
-            if last_seen_url and url == last_seen_url:
-                break
+            # 增量判定：不能用「碰到上轮那条 URL 就停」，也不能用「连续 N 条已入库就停」。
+            # 列表顶部可能是置顶公告（new.xianbao.fun 的 /gonggao/ 就是），它永远是
+            # 「已入库」状态；只要设断点，就可能在第 1~2 条上误判成「已经追上历史」，
+            # 导致下面的新线报永远扫不到（这正是线报库卡了将近一周的原因）。
+            # 所以这里不设断点：逐条扫完整页，已入库的直接跳过。
+            # 整页也就百来条字符串比较，开销可忽略；真正的开销是正文预取，
+            # 而预取只针对候选（即未入库的新文章），不会被已入库的旧文放大。
+            if known_urls and url in known_urls:
+                continue
 
             result["candidates"].append({"title": title, "url": url})
             if len(result["candidates"]) >= max_items:
                 break
 
+        result["candidate_count"] = len(result["candidates"])
+        print(f"  candidates after filters: {result['candidate_count']}")
         soup.decompose()
         gc.collect()
         return result
@@ -2105,6 +2323,14 @@ def scrape_all_sites():
             recent_articles = conn.execute(
                 "SELECT title, token_only_signature FROM articles WHERE updated_at > (now() - interval '30 minutes')"
             ).fetchall()
+            # 已入库 URL 集合：用于判断「是否已经追上历史」。
+            # 窗口取 12 小时，远大于列表页覆盖的时间跨度，足够可靠；
+            # 条数很少（这个站点一天也就几百条），开销可以忽略。
+            known_urls = {
+                row["url"] for row in conn.execute(
+                    "SELECT url FROM articles WHERE updated_at > (now() - interval '12 hours')"
+                ).fetchall()
+            }
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
             for row in recent_articles:
                 token_signature = row.get('token_only_signature')
@@ -2120,7 +2346,10 @@ def scrape_all_sites():
                 site_results = {}
                 with ThreadPoolExecutor(max_workers=len(due_sites)) as executor:
                     future_map = {
-                        executor.submit(fetch_site_candidates, skey, cfg, last_seen_url): (skey, cfg, last_seen_url)
+                        executor.submit(
+                            fetch_site_candidates, skey, cfg, last_seen_url,
+                            url_black, title_black, known_urls
+                        ): (skey, cfg, last_seen_url)
                         for skey, cfg, last_seen_url in due_sites
                     }
                     for future in as_completed(future_map):
@@ -2180,15 +2409,17 @@ def scrape_all_sites():
                                     soup = BeautifulSoup(raw_text, "html.parser")
                                     del raw_text
                                     selectors = SITES_CONFIG[skey]["content_selector"].split(",")
-                                    content_nodes = []
-                                    for sel in selectors:
-                                        node = soup.select_one(sel.strip())
-                                        if node: content_nodes.append(str(node))
+                                    # 必须在 decompose() 之前转成字符串，否则 Tag 会失效
+                                    raw_html = "".join(
+                                        str(n) for n in _collect_content_nodes(soup, selectors)
+                                    )
                                     soup.decompose()
                                     del soup
-                                    if content_nodes:
-                                        raw_html = "".join(content_nodes)
-                                        del content_nodes
+                                    if raw_html:
+                                        if _is_boilerplate_only(raw_html):
+                                            del raw_html
+                                            gc.collect()
+                                            return None
                                         inner = BeautifulSoup(raw_html, "html.parser")
                                         text = inner.get_text(" ", strip=True)
                                         inner.decompose()
@@ -2378,16 +2609,21 @@ def scrape_all_sites():
                                     )
 
                     matched_items = int(result.get("matched_items", 0) or 0)
+                    candidate_count = int(result.get("candidate_count", 0) or 0)
                     site_stats[skey] = {
                         "name": cfg.get("name", skey),
                         "new": count,
-                        "matched": matched_items,
+                        "matched": matched_items,          # 列表页命中的行数
+                        "candidates": candidate_count,     # 过滤后真正处理的条数
                         "status": "ok",
                     }
-                    # 记录成 "新增/候选"，便于区分「源站没新内容」和「选择器失效」。
-                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = f"{count}/{matched_items}"
+                    # 记录成 "新增/候选"。用 candidates 而不是 matched：
+                    # matched 只反映列表页有多少行，候选为 0 时它依然是 101，
+                    # 会把「一条都没抓到」伪装成正常。
+                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = f"{count}/{candidate_count}"
                     update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
-                    print(f"  {skey} new items: {count} (matched {matched_items})")
+                    print(f"  {skey} new items: {count} "
+                          f"(rows {matched_items}, candidates {candidate_count})")
 
             # Commit freshly inserted articles before non-critical side effects.
             conn.commit()
@@ -2427,6 +2663,9 @@ def scrape_all_sites():
             conn.commit()
 
             total_new = sum(int(v.get("new", 0)) for v in site_stats.values())
+            if total_new:
+                # 有新文章入库就清掉页面缓存，让「有新线报」点开就是新的
+                invalidate_page_cache()
             return {
                 "status": "success",
                 "site_stats": site_stats,
