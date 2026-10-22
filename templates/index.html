@@ -167,6 +167,9 @@
         .time-highlight {
             color: #ff3b30;
             font-weight: bold;
+            /* 等宽数字：倒计时每秒变化时数字宽度不变，
+               避免整行因为文字宽度抖动而反复重排 */
+            font-variant-numeric: tabular-nums;
         }
 
         .list-item {
@@ -184,57 +187,68 @@
         }
 
         .item-title {
+            display: flex;
+            align-items: center;
+            gap: 0 6px;
             font-size: 15px;
             line-height: 1.5;
             color: #1c1c1e;
             flex-grow: 1;
             margin-right: 15px;
+            min-width: 0;
+        }
+
+        /* 标题文字单独成段：允许它在标签右侧换行，
+           而不是把标签挤到第二行去 */
+        .item-text {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-wrap: break-word;
+        }
+
+        /* 三种小标签统一盒模型：同高、同内边距、同边框。
+           垂直居中交给 flex 的 align-items:center —— 用 vertical-align 的话
+           CJK 字体下 middle 会明显偏低，而且三种标签高度不一致时更明显。 */
+        .badge-top,
+        .badge-featured,
+        .badge-bank {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            height: 18px;
+            padding: 0 6px;
+            font-size: 10px;
+            line-height: 1;
+            font-weight: 700;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            white-space: nowrap;
         }
 
         .badge-top {
             background-color: #ff3b30;
-            color: white;
-            font-size: 10px;
-            padding: 1px 4px;
-            border-radius: 4px;
-            margin-right: 5px;
-            font-weight: bold;
+            color: #fff;
+            padding: 0 5px;
         }
 
         .badge-featured {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 10px;
-            line-height: 1;
-            margin-right: 6px;
-            padding: 3px 6px;
             border-radius: 999px;
-            vertical-align: 1px;
+            letter-spacing: 0.3px;
             color: var(--featured-pill-text, #5f4314);
             background: var(--featured-pill-bg, #f2e6ca);
-            border: 1px solid var(--featured-pill-border, #d4b067);
-            font-weight: 700;
-            letter-spacing: 0.3px;
+            border-color: var(--featured-pill-border, #d4b067);
         }
-
 
         /* 银行/分类小标签：match_keyword 后端已经查出来了，直接展示 */
         .badge-bank {
-            display: inline-block;
-            font-size: 10px;
-            line-height: 1.5;
-            padding: 1px 6px;
-            border-radius: 4px;
-            margin-right: 6px;
-            vertical-align: 1px;
             color: var(--ios-blue);
             background: rgba(0, 122, 255, 0.1);
             font-weight: 600;
             max-width: 96px;
             overflow: hidden;
             text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         /* 有新线报时的提示条：不再强制 reload，点一下才刷新 */
@@ -266,6 +280,7 @@
             font-size: 12px;
             color: var(--text-sub);
             white-space: nowrap;
+            flex: 0 0 auto;
         }
     </style>
 </head>
@@ -330,7 +345,7 @@
                 {% if article.is_top %}<span class="badge-top">置顶</span>{% endif %}
                 {% if article.is_featured and current_tag != '羊毛精选' %}<span class="badge-featured">精选</span>{% endif %}
                 {% if article.match_keyword %}<span class="badge-bank">{{ article.match_keyword }}</span>{% endif %}
-                {{ article.title }}
+                <span class="item-text">{{ article.title }}</span>
             </div>
             <div class="item-time">
                 {% if article.original_time %}
@@ -391,8 +406,10 @@
         }
 
         // 倒计时：原来只显示时刻，用户还得自己算还剩多久，这里带上剩余秒数。
+        // 页面在后台时直接跳过——省掉无意义的 DOM 写入（浏览器本身也会把
+        // 后台定时器降频，这里再挡一层，切回来时下一秒就会自动刷新）。
         function updateNextRefreshLabel() {
-            if (!nextRefreshEl) return;
+            if (!nextRefreshEl || document.hidden) return;
             var ts = nextBoundaryTs();
             var next = new Date(ts);
             var hh = String(next.getHours()).padStart(2, '0');
@@ -434,7 +451,10 @@
         // 回到前台时补查一次，避免切走期间漏掉轮询
         document.addEventListener("visibilitychange", function () {
             isPageVisible = !document.hidden;
-            if (isPageVisible) checkUpdate();
+            if (isPageVisible) {
+                updateNextRefreshLabel();
+                checkUpdate();
+            }
         });
 
         // 点提示条才刷新，并且记住滚动位置（不再强制 reload 打断阅读）

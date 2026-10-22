@@ -1901,16 +1901,57 @@ def match_alert_group(title_lower, url, title_alert, url_alert):
     return matched
 
 
+# 关键词规则语法（向后兼容，老配置一个字符都不用改）：
+#   红包            纯子串匹配，和以前完全一样
+#   红包+领          标题必须同时含「红包」和「领」，顺序无关
+#   红包+领+抽       多个必含词，全都要有
+#   红包-消灭-返     含「红包」但不含任何一个排除词
+# 命中后返回的是基础词（第一个 + 或 - 之前那一段），
+# 这样 match_keyword / 首页 tag / 预警分组 / 正文预取判断都不受影响。
+_KEYWORD_RULE_SPLIT_RE = re.compile(r"([+\-])")
+
+
+def _parse_keyword_rule(rule):
+    """把 "红包+领-消灭" 拆成 ("红包", ["领"], ["消灭"])。"""
+    rule = (rule or "").strip()
+    if not rule:
+        return "", [], []
+    parts = _KEYWORD_RULE_SPLIT_RE.split(rule)
+    base = (parts[0] or "").strip()
+    required, excluded = [], []
+    for i in range(1, len(parts) - 1, 2):
+        operator = parts[i]
+        term = (parts[i + 1] or "").strip()
+        if not term:
+            continue
+        (required if operator == "+" else excluded).append(term)
+    return base, required, excluded
+
+
+def _keyword_in_title(term, title_lower, title_norm):
+    term_lower = (term or "").lower()
+    if term_lower and term_lower in title_lower:
+        return True
+    term_norm = normalize_title(term or "")
+    return bool(term_norm) and term_norm in title_norm
+
+
 def keyword_match_in_title(title, keywords):
     title_lower = (title or "").lower()
     title_norm = normalize_title(title or "")
     for kw in keywords:
-        kw_lower = (kw or "").lower()
-        kw_norm = normalize_title(kw or "")
-        if kw_lower and kw_lower in title_lower:
-            return kw
-        if kw_norm and kw_norm in title_norm:
-            return kw
+        base, required, excluded = _parse_keyword_rule(kw)
+        if not base:
+            continue
+        if not _keyword_in_title(base, title_lower, title_norm):
+            continue
+        # 必含词：任何一个缺失都不算命中
+        if any(not _keyword_in_title(t, title_lower, title_norm) for t in required):
+            continue
+        # 排除词：出现任何一个就否决
+        if any(_keyword_in_title(t, title_lower, title_norm) for t in excluded):
+            continue
+        return base
     return None
 
 
