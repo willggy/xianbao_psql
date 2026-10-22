@@ -1,19 +1,28 @@
-﻿import os
+import os
 import sys
 import threading
 import time
 import base64
+import hmac
 import re
+import secrets
 import gc  # Manual GC after large HTML parses.
 import ipaddress
 import socket
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from functools import wraps, lru_cache
+from functools import wraps
 from urllib.parse import quote, unquote, urlparse, urljoin
 import psycopg
 from psycopg.rows import dict_row
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError as exc:  # 依赖缺失时给出可操作的提示
+    raise ImportError(
+        "缺少依赖 psycopg-pool。请先安装依赖：pip install -r requirements.txt"
+        "（或单独执行 pip install psycopg-pool）"
+    ) from exc
 import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, flash, render_template, request, Response, redirect, session, url_for
@@ -58,10 +67,31 @@ app.register_blueprint(gemini_bp)
 # Secrets and runtime config
 SITE_TITLE = "古希腊掌管羊毛的神"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
-CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
+
+# 本地调试开关。默认关闭：以前默认是开的，等于默认允许弱配置。
+ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '0').strip() == '1'
+
+# SECRET_KEY：没配就每次启动随机生成（会话失效），绝不使用固定字符串。
+# 固定密钥意味着任何人拿到源码就能伪造 session 直接进后台。
+_secret_key_env = os.environ.get('SECRET_KEY', '').strip()
+if _secret_key_env:
+    app.secret_key = _secret_key_env
+elif ALLOW_INSECURE_DEFAULTS:
+    app.secret_key = 'xianbao_secret_key_888'   # 仅本地调试
+else:
+    app.secret_key = secrets.token_urlsafe(32)
+
+# ADMIN_PASSWORD / CRON_SECRET：没配就是 None，对应功能直接关闭，不再回落到 '123'。
+ADMIN_PASSWORD = (
+    os.environ.get('ADMIN_PASSWORD', '').strip()
+    or ('123' if ALLOW_INSECURE_DEFAULTS else None)
+)
+CRON_SECRET = (
+    os.environ.get('CRON_SECRET', '').strip()
+    or ('xianbao_secret_key_999' if ALLOW_INSECURE_DEFAULTS else None)
+)
+
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 PUBLISH_API_TOKEN = os.environ.get("PUBLISH_API_TOKEN", "").strip()
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
 WECHAT_WEBHOOK = os.environ.get("WECHAT_WEBHOOK", "").strip()
@@ -71,8 +101,6 @@ PUBLIC_BASE_URL = (
     os.environ.get("PUBLIC_BASE_URL", "").strip()
     or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 ).rstrip("/")
-# Local/dev safety switch
-ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '1').strip() == '1'
 
 # Site config
 SITES_CONFIG = {
@@ -183,37 +211,40 @@ def _warn(msg: str):
     print(f"[SECURITY WARNING] {msg}")
 
 
-def ensure_secure_config_or_exit():
-    """Fail fast on insecure defaults in production-like environments."""
+def _security_audit():
+    """在模块导入时执行（gunicorn 下 __main__ 不会跑）。
+
+    只打警告，不退出进程：公开页面照常工作，只把管理后台和 cron 关掉。
+    这样即使漏配环境变量，站点也不会直接下线。
+    """
     problems = []
 
-    if not os.environ.get('SECRET_KEY') or app.secret_key == 'xianbao_secret_key_888':
-        problems.append("SECRET_KEY is missing or still using default")
+    if not DATABASE_URL:
+        problems.append("DATABASE_URL 未配置：数据库相关功能不可用")
 
-    if not os.environ.get('ADMIN_PASSWORD') or ADMIN_PASSWORD == '123':
-        problems.append("ADMIN_PASSWORD is missing or still using default")
+    if not os.environ.get('SECRET_KEY', '').strip():
+        problems.append("SECRET_KEY 未配置：已随机生成，每次重启会清空所有登录状态")
 
-    if not os.environ.get('CRON_SECRET') or CRON_SECRET == 'xianbao_secret_key_999':
-        problems.append("CRON_SECRET is missing or still using default")
+    if not ADMIN_PASSWORD:
+        problems.append("ADMIN_PASSWORD 未配置：/admin 登录已禁用（返回 503）")
 
-    if not os.environ.get('DATABASE_URL'):
-        problems.append("DATABASE_URL is missing (Supabase Postgres DSN)")
-
-    if not problems:
-        return
-
-    msg = (
-        "Detected insecure defaults; startup aborted.\n"
-        + "\n".join([f"- {p}" for p in problems])
-        + "\n\nSet env vars SECRET_KEY, ADMIN_PASSWORD, CRON_SECRET, DATABASE_URL."
-        + "\nFor local debugging only, set ALLOW_INSECURE_DEFAULTS=1."
-    )
+    if not CRON_SECRET:
+        problems.append("CRON_SECRET 未配置：/cron/scrape 已禁用（返回 503）")
 
     if ALLOW_INSECURE_DEFAULTS:
-        _warn(msg)
-        return
+        problems.append("ALLOW_INSECURE_DEFAULTS=1：正在使用不安全的默认值，仅限本地调试")
 
-    raise RuntimeError(msg)
+    for p in problems:
+        _warn(p)
+
+    if problems:
+        _warn("以上问题不阻止启动；公开页面正常，管理后台与 cron 受限。")
+    else:
+        print("[SECURITY] 配置检查通过")
+
+
+# 导入即执行：覆盖 gunicorn app:app 的启动路径
+_security_audit()
 
 # Last user activity timestamp
 LAST_ACTIVE_TIME = get_beijing_now()
@@ -260,12 +291,76 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Local connection helper
+# ---- Connection pool (lazy open; created on first getconn call) ----
+_db_pool = None
+_db_pool_lock = threading.Lock()
+
+
+def _get_pool():
+    """Return the process-wide connection pool, opening it on first use."""
+    global _db_pool
+    if _db_pool is not None:
+        return _db_pool
+    with _db_pool_lock:
+        if _db_pool is None:
+            if not DATABASE_URL:
+                raise RuntimeError(
+                    "DATABASE_URL not set. Configure env var DATABASE_URL before start."
+                )
+            pool = ConnectionPool(
+                conninfo=DATABASE_URL,
+                kwargs={"row_factory": dict_row},
+                min_size=1,
+                max_size=20,
+                open=False,          # 延迟到第一次 getconn 时才建立
+                timeout=15,          # 取连接最多等待 15s
+                reconnect_timeout=30,
+                max_lifetime=1800,   # 30 分钟回收，避免长连接被中间设备掐断
+                max_idle=300,
+            )
+            pool.open(wait=False)
+            _db_pool = pool
+    return _db_pool
+
+
 def get_db_connection():
-    dsn = DATABASE_URL
-    if not dsn:
-        raise RuntimeError("DATABASE_URL not set. Configure env var DATABASE_URL before start.")
-    return psycopg.connect(dsn, row_factory=dict_row)
+    """从连接池取一个连接。调用方用完后必须调用 close_db_connection(conn) 归还。"""
+    return _get_pool().getconn()
+
+
+def close_db_connection(conn):
+    """回滚未提交事务并把连接归还连接池（不是真正关闭 TCP）。"""
+    if conn is None:
+        return
+    try:
+        # 池不做 reset，这里主动回滚，避免把未提交/出错的事务状态带给下一个调用方。
+        if not conn.closed:
+            conn.rollback()
+    except Exception:
+        # 连接已损坏时直接丢弃，不归还池子。
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    try:
+        _get_pool().putconn(conn)
+    except Exception as e:
+        print(f"[WARN] putconn failed: {e}")
+
+
+def escape_like(value: str) -> str:
+    """转义 LIKE/ILIKE 通配符，让用户输入按字面量匹配。
+
+    PostgreSQL 的 LIKE 默认转义符是反斜杠。不转义时，用户输入单个 '%'
+    会让模式变成 '%%%'，三个 ILIKE 条件恒真，退化为全表扫描 + 全表排序。
+    """
+    return (
+        (value or "")
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
 
 
 def ensure_article_feature_columns(conn):
@@ -545,6 +640,7 @@ def record_visit():
     global LAST_ACTIVE_TIME
     LAST_ACTIVE_TIME = get_beijing_now()
     
+    conn = None
     try:
         conn = get_db_connection()
         conn.execute(
@@ -555,8 +651,11 @@ def record_visit():
                    last_visit = CURRENT_TIMESTAMP''',
             (ip,),
         )
-        conn.commit(); conn.close()
-    except: pass
+        conn.commit()
+    except Exception as e:
+        print(f"[WARN] record_visit failed: {e}")
+    finally:
+        close_db_connection(conn)
 
 def upload_to_img_cdn(img_data, image_ext="png"):
     image_ext = (image_ext or "png").strip().lower()
@@ -647,7 +746,7 @@ def create_user_article(title, raw_content, is_top=0, match_keyword="羊毛精�
         conn.rollback()
         raise
     finally:
-        conn.close()
+        close_db_connection(conn)
 
 # ==========================================
 # 3. Routes
@@ -675,45 +774,47 @@ def index():
     page = request.args.get('page', 1, type=int)
     
     conn = get_db_connection()
-    ensure_article_feature_columns(conn)
-    where = "WHERE 1=1"
-    params = []
-    if tag:
-        if tag == '羊毛精选':
-            where += " AND articles.is_featured = 1"
+    try:
+        where = "WHERE 1=1"
+        params = []
+        if tag:
+            if tag == '羊毛精选':
+                where += " AND articles.is_featured = 1"
+            else:
+                where += " AND articles.match_keyword = %s"
+                params.append(tag)
+        total_from_join = False
+        if q:
+            # 每个关键词会展开成 3 个 ILIKE 条件，限制数量避免超长 q 造出巨型表达式。
+            keywords = [escape_like(kw) for kw in q.strip().split()[:10]]
+            for kw in keywords:
+                where += " AND (articles.title ILIKE %s OR articles.match_keyword ILIKE %s OR ac.content ILIKE %s)"
+                params += [f"%{kw}%", f"%{kw}%", f"%{kw}%"]
+            order_sql = "ORDER BY CASE WHEN articles.title ILIKE %s THEN 0 ELSE 1 END, articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
+            params.append(f"%{keywords[0]}%")
+            from_sql = "FROM articles LEFT JOIN article_content ac ON ac.url = articles.url"
+            total_from_join = True
         else:
-            where += " AND articles.match_keyword = %s"
-            params.append(tag)
-    total_from_join = False
-    if q:
-        keywords = q.strip().split()
-        for kw in keywords:
-            where += " AND (articles.title ILIKE %s OR articles.match_keyword ILIKE %s OR ac.content ILIKE %s)"
-            params += [f"%{kw}%", f"%{kw}%", f"%{kw}%"]
-        order_sql = "ORDER BY CASE WHEN articles.title ILIKE %s THEN 0 ELSE 1 END, articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
-        params.append(f"%{keywords[0]}%")
-        from_sql = "FROM articles LEFT JOIN article_content ac ON ac.url = articles.url"
-        total_from_join = True
-    else:
-        order_sql = "ORDER BY articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
-        from_sql = "FROM articles"
-    
-    # 只取模板需要的列，减少传输/解析开销
-    article_cols = (
-        "articles.id, articles.title, articles.url, articles.site_source, "
-        "articles.match_keyword, articles.is_top, articles.original_time, articles.updated_at"
-    )
-    articles = conn.execute(
-        f'SELECT {article_cols} {from_sql} {where} {order_sql} LIMIT %s OFFSET %s',
-        params + [PER_PAGE, (page-1)*PER_PAGE],
-    ).fetchall()
-    
-    if total_from_join:
-        total_sql = f'SELECT COUNT(*) {from_sql} {where}'
-        total = conn.execute(total_sql, params[:-1]).fetchone()["count"]
-    else:
-        total = conn.execute(f'SELECT COUNT(*) {from_sql} {where}', params).fetchone()["count"]
-    conn.close()
+            order_sql = "ORDER BY articles.is_top DESC, articles.updated_at DESC, articles.id DESC"
+            from_sql = "FROM articles"
+
+        # 只取模板需要的列，减少传输/解析开销
+        article_cols = (
+            "articles.id, articles.title, articles.url, articles.site_source, "
+            "articles.match_keyword, articles.is_top, articles.original_time, articles.updated_at"
+        )
+        articles = conn.execute(
+            f'SELECT {article_cols} {from_sql} {where} {order_sql} LIMIT %s OFFSET %s',
+            params + [PER_PAGE, (page-1)*PER_PAGE],
+        ).fetchall()
+
+        if total_from_join:
+            total_sql = f'SELECT COUNT(*) {from_sql} {where}'
+            total = conn.execute(total_sql, params[:-1]).fetchone()["count"]
+        else:
+            total = conn.execute(f'SELECT COUNT(*) {from_sql} {where}', params).fetchone()["count"]
+    finally:
+        close_db_connection(conn)
 
     return render_template('index.html', 
                            articles=articles, 
@@ -731,105 +832,110 @@ def index():
 def view():
     article_id = request.args.get("id", type=int)
     conn = get_db_connection()
-    row = conn.execute(
-        """SELECT a.*, ac.content AS article_content
-           FROM articles a
-           LEFT JOIN article_content ac ON ac.url = a.url
-           WHERE a.id = %s""",
-        (article_id,)
-    ).fetchone()
-    if not row:
-        return "内容不存在", 404
-    
-    url, site_key, title = row["url"], row["site_source"], row["title"]
-    original_url = url
-    cached_html = row["article_content"]
-    content = ""
+    try:
+        row = conn.execute(
+            """SELECT a.*, ac.content AS article_content
+               FROM articles a
+               LEFT JOIN article_content ac ON ac.url = a.url
+               WHERE a.id = %s""",
+            (article_id,)
+        ).fetchone()
+        if not row:
+            return "内容不存在", 404
 
-    if cached_html:
-        original_url = safe_extract_original_url(cached_html, fallback_url=url, site_key=site_key)
-        if site_key == "user" or site_key not in SITES_CONFIG:
-            content = cached_html
-        else:
-            content = clean_html(cached_html, site_key)
-    elif site_key in SITES_CONFIG:
-        try:
-            r = session_req.get(url, timeout=10)
-            r.encoding = 'utf-8'
-            soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Use two precise containers for xianbao_icu.
-            if site_key == "xianbao_icu":
-                content_parts = []
-                
-                # Main article body.
-                node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
-                if node1:
-                    content_parts.append(str(node1))
-                
-                # Source / supplement block.
-                node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
-                if node2:
-                    content_parts.append(str(node2))
-                
-                if content_parts:
-                    # Join both blocks with a visible separator.
-                    full_raw_content = "<br><br>".join(content_parts)
-                    
-                    # Clean common spacing noise.
-                    full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
-                    
-                    # Turn source labels plus URLs into clickable links.
-                    full_raw_content = re.sub(
-                        r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
-                        r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
-                        full_raw_content,
-                        flags=re.IGNORECASE | re.MULTILINE
-                    )
-                    
-                    conn.execute(
-                        "INSERT INTO article_content(url, content) VALUES(%s, %s) "
-                        "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
-                        (url, full_raw_content),
-                    )
-                    conn.commit()
-                    original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
-                    content = clean_html(full_raw_content, site_key)
-                else:
-                    content = "暂无核心内容"
+        url, site_key, title = row["url"], row["site_source"], row["title"]
+        original_url = url
+        cached_html = row["article_content"]
+        content = ""
+
+        if cached_html:
+            original_url = safe_extract_original_url(cached_html, fallback_url=url, site_key=site_key)
+            if site_key == "user" or site_key not in SITES_CONFIG:
+                content = cached_html
             else:
-                # Keep the generic logic for other sites.
-                selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
-                content_nodes = []
-                for sel in selectors:
-                    node = soup.select_one(sel.strip())
-                    if node: content_nodes.append(str(node))
-                
-                if content_nodes:
-                    full_raw_content = "".join(content_nodes)
-                    conn.execute(
-                        "INSERT INTO article_content(url, content) VALUES(%s, %s) "
-                        "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
-                        (url, full_raw_content),
-                    )
-                    conn.commit()
-                    original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
-                    content = clean_html(full_raw_content, site_key)
+                content = clean_html(cached_html, site_key)
+        elif site_key in SITES_CONFIG:
+            try:
+                r = session_req.get(url, timeout=10)
+                r.encoding = 'utf-8'
+                soup = BeautifulSoup(r.text, "html.parser")
+
+                # Use two precise containers for xianbao_icu.
+                if site_key == "xianbao_icu":
+                    content_parts = []
+
+                    # Main article body.
+                    node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
+                    if node1:
+                        content_parts.append(str(node1))
+
+                    # Source / supplement block.
+                    node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
+                    if node2:
+                        content_parts.append(str(node2))
+
+                    if content_parts:
+                        # Join both blocks with a visible separator.
+                        full_raw_content = "<br><br>".join(content_parts)
+
+                        # Clean common spacing noise.
+                        full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
+
+                        # Turn source labels plus URLs into clickable links.
+                        full_raw_content = re.sub(
+                            r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
+                            r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
+                            full_raw_content,
+                            flags=re.IGNORECASE | re.MULTILINE
+                        )
+
+                        conn.execute(
+                            "INSERT INTO article_content(url, content) VALUES(%s, %s) "
+                            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+                            (url, full_raw_content),
+                        )
+                        conn.commit()
+                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
+                        content = clean_html(full_raw_content, site_key)
+                    else:
+                        content = "暂无核心内容"
                 else:
-                    content = "暂无内容"
-                    
-        except Exception as e:
-            print(f"Error fetching content: {e}")
-            content = "加载原文失败，请稍后重试或打开原文链接。"
-    conn.close()
-    return render_template("detail.html", title=title, content=content, original_url=original_url, time=row['original_time'])
+                    # Keep the generic logic for other sites.
+                    selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
+                    content_nodes = []
+                    for sel in selectors:
+                        node = soup.select_one(sel.strip())
+                        if node: content_nodes.append(str(node))
+
+                    if content_nodes:
+                        full_raw_content = "".join(content_nodes)
+                        conn.execute(
+                            "INSERT INTO article_content(url, content) VALUES(%s, %s) "
+                            "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+                            (url, full_raw_content),
+                        )
+                        conn.commit()
+                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
+                        content = clean_html(full_raw_content, site_key)
+                    else:
+                        content = "暂无内容"
+
+            except Exception as e:
+                print(f"Error fetching content: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                content = "加载原文失败，请稍后重试或打开原文链接。"
+
+        return render_template("detail.html", title=title, content=content, original_url=original_url, time=row['original_time'])
+    finally:
+        close_db_connection(conn)
 
 @app.route('/admin')
 @login_required
 def admin_panel():
     conn = get_db_connection()
-    ensure_article_feature_columns(conn)
-    ensure_config_rules_schema(conn)
     # Initialize defaults to avoid UnboundLocalError.
     whitelist, blacklist, alertlist, my_articles = [], [], [], []
     total_arts, total_visits = 0, 0
@@ -862,7 +968,7 @@ def admin_panel():
     except Exception as e:
         print(f"admin data load failed: {e}")
     finally:
-        conn.close()
+        close_db_connection(conn)
 
     # Render with safe defaults even if the query failed.
     stats = {
@@ -884,9 +990,6 @@ def admin_panel():
 @app.route('/admin/featured')
 @login_required
 def admin_featured():
-    conn = get_db_connection()
-    ensure_article_feature_columns(conn)
-
     status = request.args.get('status', 'all').strip() or 'all'
     bank = request.args.get('bank', '').strip()
     q = request.args.get('q', '').strip()
@@ -905,15 +1008,18 @@ def admin_featured():
 
     if q:
         where.append("title LIKE %s")
-        params.append(f"%{q}%")
+        params.append(f"%{escape_like(q)}%")
 
-    featured_articles = conn.execute(
-        "SELECT id, title, match_keyword, original_time, updated_at, is_top, is_featured, featured_at "
-        f"FROM articles WHERE {' AND '.join(where)} "
-        "ORDER BY is_featured DESC, COALESCE(featured_at, updated_at) DESC, id DESC LIMIT 300",
-        params,
-    ).fetchall()
-    conn.close()
+    conn = get_db_connection()
+    try:
+        featured_articles = conn.execute(
+            "SELECT id, title, match_keyword, original_time, updated_at, is_top, is_featured, featured_at "
+            f"FROM articles WHERE {' AND '.join(where)} "
+            "ORDER BY is_featured DESC, COALESCE(featured_at, updated_at) DESC, id DESC LIMIT 300",
+            params,
+        ).fetchall()
+    finally:
+        close_db_connection(conn)
 
     return render_template(
         'admin_featured.html',
@@ -923,6 +1029,8 @@ def admin_featured():
         current_bank=bank,
         q=q,
     )
+
+
 @app.route('/admin/refresh', methods=['GET', 'POST'])
 @login_required  # manual refresh requires login
 def admin_refresh():
@@ -996,39 +1104,48 @@ def api_publish():
 @login_required
 def edit_article(aid):
     conn = get_db_connection()
-    if request.method == 'POST':
-        title = request.form.get('title')
-        raw_content = request.form.get('content')
-        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
-        def img_replacer(match):
-            try:
-                image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
-                return f'src="{cdn}"' if cdn else match.group(0)
-            except: return match.group(0)
-            
-        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
-        row = conn.execute("SELECT url FROM articles WHERE id=%s", (aid,)).fetchone()
-        if row:
-            conn.execute("UPDATE articles SET title=%s, is_top=%s WHERE id=%s", (title, is_top, aid))
-            conn.execute("UPDATE article_content SET content=%s WHERE url=%s", (processed, row['url']))
-            conn.commit()
-        conn.close()
-        return redirect('/admin')
+    try:
+        if request.method == 'POST':
+            title = request.form.get('title')
+            raw_content = request.form.get('content')
+            is_top = 1 if request.form.get('publish_mode') == 'top' else 0
 
-    article = conn.execute("SELECT * FROM articles WHERE id=%s AND site_source='user'", (aid,)).fetchone()
-    if not article:
-        return "未找到文章", 404
-    content = conn.execute("SELECT content FROM article_content WHERE url=%s", (article['url'],)).fetchone()['content']
-    conn.close()
-    return render_template('edit.html', article=article, content=content)
+            def img_replacer(match):
+                try:
+                    image_ext = (match.group(1) or "png").split(";")[0].strip().lower()
+                    cdn = upload_to_img_cdn(base64.b64decode(match.group(2)), image_ext=image_ext)
+                    return f'src="{cdn}"' if cdn else match.group(0)
+                except Exception as e:
+                    print(f"[WARN] edit img upload failed: {e}")
+                    return match.group(0)
+
+            processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+            row = conn.execute("SELECT url FROM articles WHERE id=%s", (aid,)).fetchone()
+            if row:
+                conn.execute("UPDATE articles SET title=%s, is_top=%s WHERE id=%s", (title, is_top, aid))
+                conn.execute("UPDATE article_content SET content=%s WHERE url=%s", (processed, row['url']))
+                conn.commit()
+            return redirect('/admin')
+
+        article = conn.execute("SELECT * FROM articles WHERE id=%s AND site_source='user'", (aid,)).fetchone()
+        if not article:
+            return "未找到文章", 404
+        content_row = conn.execute("SELECT content FROM article_content WHERE url=%s", (article['url'],)).fetchone()
+        content = content_row['content'] if content_row else ""
+        return render_template('edit.html', article=article, content=content)
+    finally:
+        close_db_connection(conn)
+
 
 @app.route('/article/top/<int:aid>')
 @login_required
 def toggle_top(aid):
     conn = get_db_connection()
-    conn.execute("UPDATE articles SET is_top = 1 - is_top WHERE id=%s", (aid,))
-    conn.commit(); conn.close()
+    try:
+        conn.execute("UPDATE articles SET is_top = 1 - is_top WHERE id=%s", (aid,))
+        conn.commit()
+    finally:
+        close_db_connection(conn)
     return redirect('/admin')
 
 
@@ -1036,45 +1153,57 @@ def toggle_top(aid):
 @login_required
 def toggle_featured(aid):
     conn = get_db_connection()
-    ensure_article_feature_columns(conn)
-    row = conn.execute("SELECT id, title, url, site_source, match_keyword, is_featured, featured_notified FROM articles WHERE id=%s", (aid,)).fetchone()
-    if not row:
-        conn.close()
-        return redirect(url_for('admin_featured'))
+    should_notify = False
+    try:
+        row = conn.execute("SELECT id, title, url, site_source, match_keyword, is_featured, featured_notified FROM articles WHERE id=%s", (aid,)).fetchone()
+        if not row:
+            return redirect(url_for('admin_featured'))
 
-    is_now_featured = row['is_featured'] == 0
+        is_now_featured = row['is_featured'] == 0
 
-    conn.execute(
-        "UPDATE articles SET is_featured = 1 - is_featured, featured_at = CASE WHEN is_featured = 0 THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=%s",
-        (aid,),
-    )
+        conn.execute(
+            "UPDATE articles SET is_featured = 1 - is_featured, featured_at = CASE WHEN is_featured = 0 THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=%s",
+            (aid,),
+        )
+        conn.commit()
 
-    if is_now_featured and not row['featured_notified'] and row['site_source'] != 'user':
+        should_notify = bool(is_now_featured and not row['featured_notified'] and row['site_source'] != 'user')
+        notify_row = row
+    finally:
+        close_db_connection(conn)
+
+    if should_notify:
+        # 通知是外部 HTTP 调用，放在连接归还之后做，避免长时间占用池内连接。
+        conn = get_db_connection()
         try:
-            notify_url = build_article_view_url(row['id']) or row['url']
-            cleaned_title = strip_command_token(row['title'])
+            notify_url = build_article_view_url(notify_row['id']) or notify_row['url']
+            cleaned_title = strip_command_token(notify_row['title'])
             preview_title = build_preview_text(cleaned_title, limit=20)
-            command_token = "\n".join(extract_command_tokens(row['title'])) or fetch_article_command_token(row['url'], row['site_source'])
+            command_token = "\n".join(extract_command_tokens(notify_row['title'])) or fetch_article_command_token(notify_row['url'], notify_row['site_source'])
             _send_one_notification("线报-精选", notify_url, preview_title, command_token)
             conn.execute("UPDATE articles SET featured_notified = 1 WHERE id=%s", (aid,))
+            conn.commit()
         except Exception as e:
             print(f"featured notify error: {e}")
+        finally:
+            close_db_connection(conn)
 
-    conn.commit()
-    conn.close()
     next_url = request.args.get('next') or url_for('admin_featured')
     return redirect(next_url)
+
 
 @app.route('/article/delete/<int:aid>')
 @login_required
 def delete_article(aid):
     conn = get_db_connection()
-    row = conn.execute("SELECT url FROM articles WHERE id=%s", (aid,)).fetchone()
-    if row:
-        conn.execute("DELETE FROM articles WHERE id=%s", (aid,))
-        conn.execute("DELETE FROM article_content WHERE url=%s", (row['url'],))
-        conn.commit()
-    conn.close()
+    try:
+        row = conn.execute("SELECT url FROM articles WHERE id=%s", (aid,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM articles WHERE id=%s", (aid,))
+            conn.execute("DELETE FROM article_content WHERE url=%s", (row['url'],))
+            conn.commit()
+    finally:
+        close_db_connection(conn)
     return redirect('/admin')
 
 @app.route('/api/rule', methods=['POST'])
@@ -1087,35 +1216,26 @@ def api_rule():
     alert_group = request.form.get('alert_group', '').strip()
     rid = request.form.get('id')
     conn = get_db_connection()
-    has_alert_group = ensure_config_rules_schema(conn)
     try:
         if action == 'add' and kw:
-            if has_alert_group:
-                conn.execute(
-                    "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
-                    "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
-                    (rtype, kw, scope, alert_group if rtype == "alert" else None),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                    (rtype, kw, scope),
-                )
+            conn.execute(
+                "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (keyword, match_scope) DO UPDATE SET alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group)",
+                (rtype, kw, scope, alert_group if rtype == "alert" else None),
+            )
         elif action == 'delete' and rid:
             conn.execute("DELETE FROM config_rules WHERE id=%s", (rid,))
         conn.commit()
     except Exception as e:
         print(f"rule operation failed: {e}")
     finally:
-        conn.close()
+        close_db_connection(conn)
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/sync-bank-alerts', methods=['POST'])
 @login_required
 def sync_bank_alerts():
     conn = get_db_connection()
-    has_alert_group = ensure_config_rules_schema(conn)
     added = 0
     try:
         for bank_name, keywords in BANK_KEYWORDS.items():
@@ -1124,20 +1244,13 @@ def sync_bank_alerts():
                 if not kw:
                     continue
                 with conn.cursor() as cur:
-                    if has_alert_group:
-                        cur.execute(
-                            "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
-                            "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
-                            "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
-                            "WHERE config_rules.rule_type = 'alert'",
-                            ("alert", kw, "title", bank_name),
-                        )
-                    else:
-                        cur.execute(
-                            "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                            ("alert", kw, "title"),
-                        )
+                    cur.execute(
+                        "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
+                        "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
+                        "WHERE config_rules.rule_type = 'alert'",
+                        ("alert", kw, "title", bank_name),
+                    )
                     added += cur.rowcount
         conn.commit()
         flash(f"Bank keywords synced to alert rules: +{added}", "success")
@@ -1145,7 +1258,7 @@ def sync_bank_alerts():
         conn.rollback()
         flash(f"Sync bank alert rules failed: {e}", "danger")
     finally:
-        conn.close()
+        close_db_connection(conn)
     return redirect(url_for('admin_panel'))
 
 
@@ -1158,7 +1271,6 @@ def sync_alert_group(group_name):
         return redirect(url_for('admin_panel'))
 
     conn = get_db_connection()
-    has_alert_group = ensure_config_rules_schema(conn)
     added = 0
     try:
         for keyword in aliases:
@@ -1166,20 +1278,13 @@ def sync_alert_group(group_name):
             if not kw:
                 continue
             with conn.cursor() as cur:
-                if has_alert_group:
-                    cur.execute(
-                        "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
-                        "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
-                        "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
-                        "WHERE config_rules.rule_type = 'alert'",
-                        ("alert", kw, "title", group_name),
-                    )
-                else:
-                    cur.execute(
-                        "INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (%s, %s, %s) "
-                        "ON CONFLICT (keyword, match_scope) DO NOTHING",
-                        ("alert", kw, "title"),
-                    )
+                cur.execute(
+                    "INSERT INTO config_rules (rule_type, keyword, match_scope, alert_group) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (keyword, match_scope) DO UPDATE SET "
+                    "alert_group = COALESCE(NULLIF(EXCLUDED.alert_group, ''), config_rules.alert_group) "
+                    "WHERE config_rules.rule_type = 'alert'",
+                    ("alert", kw, "title", group_name),
+                )
                 added += cur.rowcount
         conn.commit()
         flash(f"Synced alert group {group_name}: +{added}", "success")
@@ -1187,34 +1292,29 @@ def sync_alert_group(group_name):
         conn.rollback()
         flash(f"Sync alert group failed: {e}", "danger")
     finally:
-        conn.close()
+        close_db_connection(conn)
     return redirect(url_for('admin_panel'))
 
 @app.route('/logs')
 @login_required
 def show_logs():
     conn = get_db_connection()
-    logs = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY created_at DESC, id DESC LIMIT 50').fetchall()
-    visitors = conn.execute('SELECT * FROM visit_stats ORDER BY last_visit DESC LIMIT 30').fetchall()
-    conn.close()
+    try:
+        logs = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY created_at DESC, id DESC LIMIT 50').fetchall()
+        visitors = conn.execute('SELECT * FROM visit_stats ORDER BY last_visit DESC LIMIT 30').fetchall()
+    finally:
+        close_db_connection(conn)
     return render_template('logs.html', logs=logs, visitors=visitors)
-
-@lru_cache(maxsize=200)
-def fetch_image_cached(url):
-    """
-    Download and cache remote images.
-    Returns `(bytes, content-type)`.
-    """
-    r = session_req.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, timeout=15)
-    return r.content, r.headers.get("Content-Type", "image/jpeg")
 
 
 @app.route('/api/check_update')
 def check_update():
     """Lightweight polling endpoint used by the homepage."""
     conn = get_db_connection()
-    row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        close_db_connection(conn)
     return {"last_id": row['id'] if row else 0}
 
 
@@ -1399,34 +1499,102 @@ def img_proxy():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if request.method == 'POST' and request.form.get('password') == ADMIN_PASSWORD:
-        session['is_logged_in'] = True
-        return redirect('/admin')
+    if not ADMIN_PASSWORD:
+        return (
+            "管理后台登录已禁用：ADMIN_PASSWORD 未配置。"
+            "请在环境变量中设置 ADMIN_PASSWORD 后重新部署。",
+            503,
+        )
+    if request.method == 'POST':
+        submitted = (request.form.get('password') or '').encode('utf-8')
+        if hmac.compare_digest(submitted, ADMIN_PASSWORD.encode('utf-8')):
+            session['is_logged_in'] = True
+            return redirect('/admin')
     return render_template('login.html')
 
 @app.route('/logout')
 def logout():
     session.clear(); return redirect('/')
 
+# cron 触发的最小间隔保护（秒）。默认 60s，远小于常见的 2 分钟调度节奏。
+_cron_last_start_ts = 0.0
+_cron_guard_lock = threading.Lock()
+_cron_query_secret_warned = False  # query 传密钥的提醒每个进程只打一次
+CRON_MIN_INTERVAL_SEC = float(os.environ.get("CRON_MIN_INTERVAL_SEC", "60"))
+
+
+def _extract_cron_secret():
+    """取 cron 密钥，返回 (secret, via_query)。
+
+    优先请求头，其次 query/表单。走 query 时返回 via_query=True，用于打迁移提醒。
+    """
+    header_secret = (request.headers.get('X-Cron-Secret') or '').strip()
+    if header_secret:
+        return header_secret, False
+
+    auth = (request.headers.get('Authorization') or '').strip()
+    if auth:
+        if auth.lower().startswith('bearer '):
+            auth = auth[7:].strip()
+        return auth, False
+
+    query_secret = (request.args.get('secret') or '').strip()
+    if query_secret:
+        return query_secret, True
+
+    form_secret = (request.form.get('secret') or '').strip()
+    if form_secret:
+        return form_secret, True
+
+    return '', False
+
+
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
-    # Accept secret from header or query/body parameter.
-    provided_secret = (
-        request.headers.get('Authorization') or
-        request.args.get('secret') or
-        request.form.get('secret')
-    )
-    
-    if provided_secret != CRON_SECRET:
+    global _cron_last_start_ts, _cron_query_secret_warned
+
+    if not CRON_SECRET:
+        return {
+            "error": "CRON_SECRET not configured; cron endpoint disabled",
+            "hint": "在环境变量中设置 CRON_SECRET 后重新部署",
+        }, 503
+
+    provided_secret, via_query = _extract_cron_secret()
+    if not provided_secret or not hmac.compare_digest(
+        provided_secret.encode('utf-8'), CRON_SECRET.encode('utf-8')
+    ):
+        caller = request.headers.get('X-Forwarded-For', request.remote_addr)
+        print(f"[CRON] unauthorized from {caller}")
         return {"error": "Unauthorized"}, 401
-    
+
+    # 每个进程只提醒一次，避免 2 分钟一次的调度刷屏。
+    if via_query and not _cron_query_secret_warned:
+        _cron_query_secret_warned = True
+        print("[CRON][SECURITY] secret 通过 URL query 传递，会进访问日志；建议改用 X-Cron-Secret 请求头")
+
+    # 最小间隔：密钥一旦泄露，也限制被无限次触发的爆炸半径。
+    now_ts = time.time()
+    with _cron_guard_lock:
+        elapsed = now_ts - _cron_last_start_ts
+        if _cron_last_start_ts and elapsed < CRON_MIN_INTERVAL_SEC:
+            return {
+                "status": "skipped",
+                "reason": "too_frequent",
+                "retry_after_sec": round(CRON_MIN_INTERVAL_SEC - elapsed, 1),
+            }, 200
+        _cron_last_start_ts = now_ts
+
     now = get_beijing_now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
+    caller_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    print(
+        f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: "
+        f"{request.headers.get('User-Agent', 'Unknown')} from {caller_ip}"
+    )
     # Optional: skip cron during recent user activity to reduce contention.
     # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
     #     print(f"[{now}] Skip cron: recent activity detected")
     #     return {"status": "skipped", "reason": "recent activity"}, 200
-    
+
     try:
         summary = scrape_all_sites()
         summary["executed_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -1894,9 +2062,7 @@ def scrape_all_sites():
         try:
             now_beijing = get_beijing_now()
             conn = get_db_connection()
-            ensure_runtime_tables(conn)
-            ensure_config_rules_schema(conn)
-
+            # DDL 已在启动时执行，此处只做数据操作
             rules = conn.execute("SELECT * FROM config_rules").fetchall()
             title_white = [r['keyword'] for r in rules if r['rule_type'] == 'white' and r['match_scope'] == 'title']
             title_black = [r['keyword'] for r in rules if r['rule_type'] == 'black' and r['match_scope'] == 'title']
@@ -2211,10 +2377,17 @@ def scrape_all_sites():
                                         }
                                     )
 
-                    site_stats[skey] = {"name": cfg.get("name", skey), "new": count, "status": "ok"}
-                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = count
+                    matched_items = int(result.get("matched_items", 0) or 0)
+                    site_stats[skey] = {
+                        "name": cfg.get("name", skey),
+                        "new": count,
+                        "matched": matched_items,
+                        "status": "ok",
+                    }
+                    # 记录成 "新增/候选"，便于区分「源站没新内容」和「选择器失效」。
+                    log_stats[SITE_LOG_NAMES.get(skey, skey)] = f"{count}/{matched_items}"
                     update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
-                    print(f"  {skey} new items: {count}")
+                    print(f"  {skey} new items: {count} (matched {matched_items})")
 
             # Commit freshly inserted articles before non-critical side effects.
             conn.commit()
@@ -2239,6 +2412,9 @@ def scrape_all_sites():
                 ")"
             )
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND COALESCE(is_featured, 0) = 0 AND updated_at < (now() - interval '7 days')")
+            # 访客表只增不减，这里顺手清掉 90 天没来过的 IP，
+            # 避免 admin 页的 SUM(visit_count) 随时间退化成全表扫。
+            conn.execute("DELETE FROM visit_stats WHERE last_visit < (now() - interval '90 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
                 (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
@@ -2277,13 +2453,62 @@ def scrape_all_sites():
         finally:
             try:
                 if conn:
-                    conn.close()
+                    close_db_connection(conn)
             except Exception:
                 pass
 
+
+# ==========================================
+# 5. One-time schema bootstrap
+# ==========================================
+# DDL 只在进程内执行一次，不再挂在每个请求上。生产环境用 gunicorn app:app
+# 启动时 __main__ 分支不会执行，所以这里用 before_request + 一次性标志兜底。
+_schema_ready = False
+_schema_lock = threading.Lock()
+_schema_next_try = 0.0
+SCHEMA_RETRY_INTERVAL = 30  # 秒；初始化失败后隔多久再试
+
+
+def _startup_ensure_schema():
+    """执行一次 DDL 检查（幂等）。失败不抛出，避免应用起不来。"""
+    global _schema_ready, _schema_next_try
+    if _schema_ready:
+        return
+    if not DATABASE_URL:
+        _schema_ready = True
+        return
+    conn = None
+    try:
+        conn = get_db_connection()
+        # ensure_runtime_tables 内部已包含 ensure_article_feature_columns。
+        ensure_config_rules_schema(conn)
+        ensure_runtime_tables(conn)
+        _schema_ready = True
+        print("[SCHEMA] bootstrap done")
+    except Exception as e:
+        _schema_next_try = time.time() + SCHEMA_RETRY_INTERVAL
+        print(f"[SCHEMA WARN] bootstrap failed, retry in {SCHEMA_RETRY_INTERVAL}s: {e}")
+    finally:
+        close_db_connection(conn)
+
+
+@app.before_request
+def _ensure_schema_once():
+    # 非阻塞抢锁：DB 不可用时不要让所有请求排队等同一个初始化。
+    if _schema_ready or time.time() < _schema_next_try:
+        return
+    if not _schema_lock.acquire(blocking=False):
+        return
+    try:
+        _startup_ensure_schema()
+    finally:
+        _schema_lock.release()
+
+
 if __name__ == '__main__':
-    get_db_connection().close()
-    ensure_secure_config_or_exit()
+    # _security_audit() 已在模块导入时执行过
+    with _schema_lock:
+        _startup_ensure_schema()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
 

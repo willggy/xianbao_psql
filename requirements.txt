@@ -1,12 +1,15 @@
-Flask
-requests
-beautifulsoup4
-lxml
-apscheduler
-waitress
-psycopg[binary]
-python-dotenv
-gunicorn
-flask-compress
-flask-sock
-websocket-client
+# 固定主版本区间：Render 每次重新 build 都不会跳到破坏性新版本。
+# 需要升级时改这里的上界，并在本地跑一遍再推。
+Flask>=3.0,<4
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+lxml>=5.0,<6
+apscheduler>=3.10,<4
+waitress>=3.0,<4
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4
+python-dotenv>=1.0,<2
+gunicorn>=22,<24
+flask-compress>=1.14,<2
+flask-sock>=0.7,<1
+websocket-client>=1.7,<2

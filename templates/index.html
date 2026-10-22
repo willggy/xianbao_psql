@@ -275,7 +275,7 @@
     <div class="list-container">
         <div class="refresh-bar">
             <i class="bi bi-clock-history"></i>
-            每 2 分钟自动刷新，下次刷新：<span class="time-highlight">{{ next_refresh_time }}</span>
+            每 2 分钟自动刷新，下次刷新：<span class="time-highlight" id="nextRefresh">{{ next_refresh_time }}</span>
         </div>
 
         {% if articles %}
@@ -327,6 +327,21 @@
         document.addEventListener("visibilitychange", function () {
             isPageVisible = !document.hidden;
         });
+
+        // 下次刷新时间由浏览器本地计算，不依赖服务端渲染，
+        // 这样页面开着不动时倒计时也会一直准确（服务端值只作为无 JS 兜底）。
+        var REFRESH_PERIOD_MS = 120000; // 与服务端 2 分钟刷新边界保持一致
+        var nextRefreshEl = document.getElementById('nextRefresh');
+
+        function updateNextRefreshLabel() {
+            if (!nextRefreshEl) return;
+            var next = new Date(Math.ceil((Date.now() + 1) / REFRESH_PERIOD_MS) * REFRESH_PERIOD_MS);
+            var hh = String(next.getHours()).padStart(2, '0');
+            var mm = String(next.getMinutes()).padStart(2, '0');
+            nextRefreshEl.textContent = hh + ':' + mm;
+        }
+        updateNextRefreshLabel();
+        setInterval(updateNextRefreshLabel, 10000);
 
         // 每 120 秒检查一次
         setInterval(function () {
