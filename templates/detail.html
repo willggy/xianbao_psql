@@ -163,6 +163,45 @@
             margin-bottom: 12px;
         }
 
+        /* 源网址一行：真实原始地址正常显示，退回本站地址时弱化并说明 */
+        .source-line {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            margin: 0 0 14px;
+            padding: 8px 10px;
+            background: #f6f8fb;
+            border: 1px solid #e3e8ef;
+            border-radius: 8px;
+            font-size: 0.84rem;
+            color: #526274;
+            word-break: break-all;
+        }
+
+        .source-line .source-label {
+            flex: 0 0 auto;
+            font-weight: 600;
+            color: #7a8699;
+        }
+
+        .source-line a {
+            color: #007aff;
+            text-decoration: none;
+        }
+
+        .source-line a:hover {
+            text-decoration: underline;
+        }
+
+        .source-line.source-self {
+            background: #fafafa;
+            border-style: dashed;
+        }
+
+        .source-line.source-self .source-note {
+            color: #9aa6b8;
+        }
+
         /* 源站自带的抓取时间戳，压成小字弱化 */
         #art-fujia .mianbaoxie,
         #art-fujia .upd-sub {
@@ -360,6 +399,16 @@
 
         <div class="article-card">
             <div class="article-title">{{ title }}</div>
+
+            {% if original_url %}
+            <div class="source-line {{ 'source-self' if not original_is_real }}">
+                <span class="source-label">源网址：</span>
+                <a href="{{ original_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ original_url }}</a>
+                {% if not original_is_real %}
+                <span class="source-note">（正文里没提取到活动原始地址，这里是本站页面）</span>
+                {% endif %}
+            </div>
+            {% endif %}
 
             <div class="article-content">
                 {{ content | safe }}

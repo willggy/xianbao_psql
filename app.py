@@ -177,6 +177,17 @@ ALERT_GROUPS = {
 }
 ALERT_ALL_VALS = [word for words in ALERT_GROUPS.values() for word in words]
 TITLE_SIMILARITY_THRESHOLD = 0.85
+# 标题/正文签名判重的回看窗口与池子规模上限。
+# 窗口 1 小时（原来 30 分钟，跨站转发同一条线报常隔 40~90 分钟，导致首页重复）；
+# 上限 300 条保证单轮比对的字符串条数封顶 —— 判重耗时随池子大小线性涨，
+# 不设上限的话入库量一涨，单轮耗时跟着涨（见 idx_articles_update_sort 索引）。
+TITLE_DEDUPE_WINDOW = "1 hour"
+TITLE_DEDUPE_POOL_LIMIT = 300
+# 「短的完整包含在长的里就算重」：只对长度差 > 8、本来会被直接跳过的配对生效，
+# 且短的一方至少这么多归一化字符，否则「工行」这类两字短标题会被误吞进任何长标题。
+TITLE_CONTAINMENT_MIN_LEN = 8
+# 判重命中日志每轮最多打多少条（防刷屏），超出只累计计数。
+DEDUPE_LOG_MAX_PER_RUN = 30
 SITE_LOG_NAMES = {
     "xianbao": "线报库",
     "iehou": "爱猴线报",
@@ -420,9 +431,105 @@ def make_links_clickable(text):
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
 def extract_original_url(html_content, fallback_url="", site_key=""):
-    """Extract source/original URL from article HTML using per-site config first."""
+    """Extract source/original URL from article HTML using per-site config first.
+
+    只想要地址的调用方走这里；需要知道「是真实原始地址还是退回本站地址」的
+    用 extract_original_url_info。
+    """
+    return extract_original_url_info(html_content, fallback_url=fallback_url, site_key=site_key)[0]
+
+
+# 「栏目 / 导航 / 用户页 / 评论列表」这类链接的特征：命中就不是活动原始地址。
+# 三个线报站的正文里都混着评论作者页、分类页、翻页链接（正文选择器把评论块
+# 一起抓了下来，见 content_selector 里的 #art-fujia / .el-card.comment）。
+_NAV_PATH_HINTS = (
+    "/record/weibo/",      # 线报酷：评论作者页
+    "/category/", "/tag/", "/page-", "/list-", "/search",
+    "?author=", "&author=",  # 鲸线报：同作者线报
+    "/user-", "/member-", "/login", "/register", "/mod-support",
+    "/page-tools", "/page-dayhot", "/page-weekhot",
+)
+_ASSET_EXT_RE = re.compile(r"\.(?:jpg|jpeg|png|gif|webp|bmp|ico|css|js|svg|woff2?)(?:$|[?#])", re.I)
+# 锚文本 / 正文标签词：挨着这些词的链接最可信。
+_SOURCE_LABEL_RE = re.compile(
+    r"(?:来源网址|原文链接|原文地址|来源地址|本文链接|本文地址|阅读原文|查看原文|"
+    r"source|origin|original|from|link|jump)",
+    re.I,
+)
+
+
+def _site_hosts(site_key="", fallback_url=""):
+    """本站 / 线报站的域名集合：命中它的链接都是「站内链接」，不是活动原始地址。"""
+    hosts = set()
+    cfg = SITES_CONFIG.get(site_key, {}) if site_key else {}
+    for base in (cfg.get("domain", ""), fallback_url, PUBLIC_BASE_URL):
+        if not base:
+            continue
+        try:
+            host = (urlparse(base).hostname or "").lower()
+        except Exception:
+            continue
+        if host.startswith("www."):
+            host = host[4:]
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _is_site_link(href, site_hosts):
+    """站内链接（含我们自己的图片代理）——不能当原始地址。"""
+    if not href:
+        return True
+    if href.startswith("/"):
+        return True
+    try:
+        host = (urlparse(href).hostname or "").lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    for sh in site_hosts:
+        if host == sh or host.endswith("." + sh):
+            return True
+    return False
+
+
+def _is_nav_link(href):
+    try:
+        p = urlparse(href)
+    except Exception:
+        return True
+    path = (p.path or "").lower()
+    query = (p.query or "").lower()
+    probe = f"{path}?{query}"
+    if any(hint in probe for hint in _NAV_PATH_HINTS):
+        return True
+    if _ASSET_EXT_RE.search(path):
+        return True
+    # 首页 / 只有一两个路径段的栏目页：正文里不会只写一个域名就把活动放这儿
+    if not path.strip("/"):
+        return True
+    return False
+
+
+def _acceptable_original(href, site_hosts):
+    return bool(href) and not _is_site_link(href, site_hosts) and not _is_nav_link(href)
+
+
+def extract_original_url_info(html_content, fallback_url="", site_key=""):
+    """抽活动的原始地址。返回 (地址, 是否真实原始地址, 依据)。
+
+    原来的顺序有三个坑，都会让页面显示成「线报站自己的详情页地址」：
+      1. 站点配的 original_url_selectors（a[href*='source'] 这类）先跑，
+         命中的常是正文评论块里的站内链接 —— 现在一律先过 _acceptable_original。
+      2. 带标签的链接（「来源网址：https://…」）没有优先权，被通用规则抢先。
+         标签词命中的其实是最可靠的证据，提到最前。
+      3. 第 3、4 档兜底取「第一个 http 链接」，而正文第一个链接经常是图床 /
+         作者页 —— 现在同样过滤站内与导航。
+    三档都取不到才退回本站地址（is_real=False，页面会标注清楚）。
+    """
     if not html_content:
-        return fallback_url
+        return fallback_url, False, "无正文缓存"
 
     try:
         soup = BeautifulSoup(html_content, "lxml")
@@ -432,6 +539,7 @@ def extract_original_url(html_content, fallback_url="", site_key=""):
     cfg = SITES_CONFIG.get(site_key, {}) if site_key else {}
     selectors = cfg.get("original_url_selectors", []) or []
     regexes = cfg.get("original_url_regexes", []) or []
+    site_hosts = _site_hosts(site_key, fallback_url)
 
     def _normalize_href(href: str) -> str:
         href = (href or "").strip()
@@ -440,58 +548,115 @@ def extract_original_url(html_content, fallback_url="", site_key=""):
         if href.startswith("//"):
             href = "https:" + href
         elif href.startswith("/"):
-            href = urljoin(fallback_url, href) if fallback_url else href
+            # 相对链接一律是站内的（我们自己的 /img_proxy 也是），
+            # 不再 urljoin 成站内绝对地址，省得它冒充原始地址。
+            return ""
         return href if href.startswith(("http://", "https://")) else ""
 
-    # 1) Site-level selectors (highest priority)
-    for sel in selectors:
+    # 正文里所有 <a> 的 href，用来把「文本抽到的被截断地址」还原成完整链接：
+    # 线报站常把长 URL 显示成 "https://im.icbc.com.cn/ICBCMPSer ... tivityId=800000712&"，
+    # 从文本正则抽到的是这串省略号版本，点不开，必须以 href 为准。
+    anchor_hrefs = []
+    for a in soup.select("a[href]"):
+        h = _normalize_href(a.get("href", ""))
+        if h:
+            anchor_hrefs.append(h)
+
+    def _full_form(cand):
+        for h in anchor_hrefs:
+            if h == cand or (cand and h.startswith(cand[:24])):
+                return h
+        return cand
+
+    # 1) 带「来源 / 原文 / source」标签的链接：标签挨着的第一个可用外链最可信。
+    #    评论块里的链接不算 —— 正文选择器会把评论一起抓下来
+    #    （#art-fujia / .el-card.comment），评论里有人贴「原文链接」不该顶掉真正的来源行。
+    _COMMENT_CONTAINERS = ("#art-fujia", ".art-fujia", ".el-card.comment", ".comment-list", "#comment")
+    comment_nodes = set()
+    for sel in _COMMENT_CONTAINERS:
         try:
-            for a in soup.select(sel):
-                href = _normalize_href(a.get("href", ""))
-                if href:
-                    return href
+            comment_nodes.update(id(n) for n in soup.select(sel))
         except Exception:
             continue
 
-    # 2) Keyword anchor text
-    keywords = ("source", "origin", "original", "from", "link", "jump")
+    def _in_comment(node):
+        return any(id(anc) in comment_nodes for anc in node.parents)
+
+    labelled = []
     for a in soup.select("a[href]"):
         href = _normalize_href(a.get("href", ""))
         if not href:
             continue
-        t = a.get_text(" ", strip=True).lower()
-        if any(k.lower() in t for k in keywords):
-            return href
+        if comment_nodes and _in_comment(a):
+            continue
+        anchor_text = a.get_text(" ", strip=True)
+        parent_text = ""
+        try:
+            parent = a.parent
+            parent_text = parent.get_text(" ", strip=True) if parent is not None else ""
+        except Exception:
+            parent_text = ""
+        if _SOURCE_LABEL_RE.search(anchor_text) or _SOURCE_LABEL_RE.search(parent_text[:120]):
+            labelled.append(href)
 
-    # 3) Site-level regex + defaults
+    # 2) 只有「来源网址：」这种显式标签的正则（模板文字里抽地址用）。
+    #    站点自己配的 original_url_regexes 多是裸 URL 通配，不算标签证据，
+    #    放到第 4 档，否则它会抢在真实链接前面、还可能抽到被省略号截断的文本。
     text_blob = soup.get_text(" ", strip=True)
-    default_patterns = [
-        r"(?:source|origin|original|from|link)\s*[:锛歖?\s*(https?://[^\s<>\"']+)",
-        r"(https?://[^\s<>\"']+)",
+    label_patterns = [
+        r"(?:来源网址|原文链接|原文地址|来源地址|本文链接|本文地址|阅读原文|查看原文)"
+        r"\s*[:：]?\s*(https?://[^\s<>\"']+)",
+        r"(?:source|origin|original|from|jump)\s*[:：]\s*(https?://[^\s<>\"']+)",
     ]
-    for pat in list(regexes) + default_patterns:
+    for pat in label_patterns:
         try:
             m = re.search(pat, text_blob, flags=re.IGNORECASE)
             if not m:
                 continue
-            if m.lastindex:
-                for i in range(1, m.lastindex + 1):
-                    cand = (m.group(i) or "").strip()
-                    if cand.startswith(("http://", "https://")):
-                        return cand
-            cand = (m.group(0) or "").strip()
-            if cand.startswith(("http://", "https://")):
-                return cand
+            cands = [m.group(i) for i in range(1, (m.lastindex or 0) + 1)] or [m.group(0)]
+            for cand in cands:
+                cand = (cand or "").strip().rstrip(".,;:!?)]（）)，。；")
+                if cand.startswith(("http://", "https://")):
+                    labelled.append(_full_form(cand))
+                    break
+        except Exception:
+            continue
+    for href in labelled:
+        if _acceptable_original(href, site_hosts):
+            return href, True, "带来源/原文标签的链接"
+
+    # 3) 站点级选择器：优先级高于通用规则，但必须先排除站内和导航链接。
+    for sel in selectors:
+        try:
+            for a in soup.select(sel):
+                href = _normalize_href(a.get("href", ""))
+                if _acceptable_original(href, site_hosts):
+                    return href, True, f"站点选择器 {sel}"
         except Exception:
             continue
 
-    # 4) Fallback first http(s) link
+    # 4) 正文里的外链，按出现顺序。线报正文第一个外链通常就是活动页。
     for a in soup.select("a[href]"):
         href = _normalize_href(a.get("href", ""))
-        if href:
-            return href
+        if _acceptable_original(href, site_hosts):
+            return href, True, "正文第一个外链"
 
-    return fallback_url
+    # 5) 文本兜底：站点配的 regex + 通用 URL 模式（同样过滤站内/导航/图床）。
+    for pat in list(regexes) + [r"(https?://[^\s<>\"']+)"]:
+        try:
+            for m in re.finditer(pat, text_blob):
+                cands = [m.group(i) for i in range(1, (m.lastindex or 0) + 1)] or [m.group(0)]
+                for cand in cands:
+                    cand = (cand or "").strip().rstrip(".,;:!?)]（）)，。；")
+                    if not cand.startswith(("http://", "https://")):
+                        continue
+                    cand = _full_form(cand)
+                    if _acceptable_original(cand, site_hosts):
+                        return cand, True, "正文文本中的链接"
+        except Exception:
+            continue
+
+    return fallback_url, False, "未能识别原始地址，退回本站地址"
 
 
 def safe_extract_original_url(html_content, fallback_url="", site_key=""):
@@ -602,12 +767,38 @@ def _drop_comment_avatars(soup):
     return removed
 
 
+# 原网页没有评论时，源站返回的不是空标签，而是一个带占位文字的整块
+# （鲸线报：<div class="el-card comment">暂无评论</div>；
+#   线报酷：<div id="art-fujia">原帖还没有人评论，等待重新抓取中~</div>）。
+# 原样渲染到详情页就是一大片虚线框空白。这里把「没有真评论」的评论块整个去掉；
+# 有真实评论（存在 .li 评论条目 / 评论文字）的照常保留。
+def _drop_empty_comment_blocks(soup):
+    dropped = 0
+    # 鲸线报（Element Plus 评论卡片）
+    for el in soup.select(".el-card.comment"):
+        text = re.sub(r"[\s　]+", "", el.get_text(strip=True))
+        if text in ("", "暂无评论", "评论列表", "评论列表暂无评论", "还没有评论"):
+            el.decompose()
+            dropped += 1
+    # 线报酷（附加信息块）：带 .no-comment 占位，或评论列表里一条评论都没有
+    for el in soup.select("#art-fujia, .art-fujia"):
+        if el.select(".no-comment"):
+            el.decompose()
+            dropped += 1
+            continue
+        if not el.select(".comment-list .li, .ul .li, .c-neirong"):
+            el.decompose()
+            dropped += 1
+    return dropped
+
+
 def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
     soup = BeautifulSoup(html_content, "lxml")
     _drop_comment_avatars(soup)
+    _drop_empty_comment_blocks(soup)
 
     site_cfg = SITES_CONFIG.get(site_key, {})
     site_domain = site_cfg.get("domain", "")
@@ -1047,17 +1238,30 @@ def view():
             return "内容不存在", 404
 
         url, site_key, title = row["url"], row["site_source"], row["title"]
+        # 默认是线报站自己的详情页地址（本站地址），不是活动原始地址；
+        # original_is_real 决定页面把它标成「原始地址」还是「本站页面」。
         original_url = url
+        original_is_real = False
+        original_reason = "无正文可提取"
         cached_html = row["article_content"]
         if cached_html and site_key in SITES_CONFIG and _is_boilerplate_only(cached_html):
             # 历史脏数据：库里只存了「来源网址 / 免责声明」一行。
             # 当作没有缓存，走实时抓取并覆盖这一行，实现访问即自愈。
+            # 但这一行本身就带着活动原始地址（「来源网址：https://…」），
+            # 先把它抽出来再用 —— 以前是整段丢掉，original_url 永远退成本站地址。
+            boiler_url, boiler_real, boiler_reason = extract_original_url_info(
+                cached_html, fallback_url=url, site_key=site_key
+            )
+            if boiler_real:
+                original_url, original_is_real, original_reason = boiler_url, True, f"模板来源行（{boiler_reason}）"
             print(f"[CONTENT HEAL] 丢弃疑似脏缓存: {url}")
             cached_html = None
         content = ""
 
         if cached_html:
-            original_url = safe_extract_original_url(cached_html, fallback_url=url, site_key=site_key)
+            original_url, original_is_real, original_reason = extract_original_url_info(
+                cached_html, fallback_url=url, site_key=site_key
+            )
             if site_key == "user" or site_key not in SITES_CONFIG:
                 content = cached_html
             else:
@@ -1076,6 +1280,12 @@ def view():
                     if _is_boilerplate_only(full_raw_content):
                         # 正文选择器已失效，只抓到「来源网址 / 免责声明」这类模板文字。
                         # 不写库，避免把模板文字当成正文长期缓存下来。
+                        # 同样先从这一行里提原始地址：提不到才退回本站地址。
+                        b_url, b_real, b_reason = extract_original_url_info(
+                            full_raw_content, fallback_url=url, site_key=site_key
+                        )
+                        if b_real:
+                            original_url, original_is_real, original_reason = b_url, True, f"模板来源行（{b_reason}）"
                         print(f"[CONTENT MISS] {site_key} 未抓到有效正文: {url}")
                         content = "暂无内容"
                     else:
@@ -1085,7 +1295,9 @@ def view():
                             (url, full_raw_content),
                         )
                         conn.commit()
-                        original_url = safe_extract_original_url(full_raw_content, fallback_url=url, site_key=site_key)
+                        original_url, original_is_real, original_reason = extract_original_url_info(
+                            full_raw_content, fallback_url=url, site_key=site_key
+                        )
                         content = clean_html(full_raw_content, site_key)
                 else:
                     print(f"[CONTENT MISS] {site_key} 无选择器命中: {url}")
@@ -1099,7 +1311,19 @@ def view():
                     pass
                 content = "加载原文失败，请稍后重试或打开原文链接。"
 
-        return render_template("detail.html", title=title, content=content, original_url=original_url, time=row['original_time'])
+        # 自己发布的文章 url 是 user://… 这种内部标识，不是能点的地址：不显示。
+        if not str(original_url or "").startswith(("http://", "https://")):
+            original_url, original_is_real = "", False
+        if original_reason:
+            print(f"[ORIGINAL URL] {site_key} id={article_id} real={original_is_real} | {original_reason} | {original_url}")
+        return render_template(
+            "detail.html",
+            title=title,
+            content=content,
+            original_url=original_url,
+            original_is_real=original_is_real,
+            time=row['original_time'],
+        )
     finally:
         close_db_connection(conn)
 
@@ -1787,18 +2011,36 @@ def normalize_title(title_text):
     t = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", t)
     return t
 def is_similar_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THRESHOLD):
+    return find_duplicate_title(norm_title, norm_titles, threshold=threshold)[0] is not None
+
+def find_duplicate_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THRESHOLD):
+    """返回 (撞上的标题, 命中的规则)，没撞上返回 (None, None)。
+
+    规则顺序与原来一致：完全相同 → 长度差 > 8 跳过 → 相似度 ≥ 0.85；
+    只在「长度差 > 8 被跳过」这一路补一条包含判定：短的一方完整出现在
+    长的一方里就算重。治的是「原标题 + 尾巴话」这类只差一个字却被长度门槛
+    顶出门槛的情况。短标题必须够长（≥ TITLE_CONTAINMENT_MIN_LEN 个归一化字符）
+    才参与，否则「工行」这种两字标题会被任何长标题误吞。
+    """
     if not norm_title:
-        return False
+        return None, None
     for existing in norm_titles:
         if not existing:
             continue
         if norm_title == existing:
-            return True
-        if abs(len(norm_title) - len(existing)) > 8:
+            return existing, "标题完全相同"
+        length_gap = abs(len(norm_title) - len(existing))
+        if length_gap > 8:
+            shorter, longer = (
+                (norm_title, existing) if len(norm_title) <= len(existing) else (existing, norm_title)
+            )
+            if len(shorter) >= TITLE_CONTAINMENT_MIN_LEN and shorter in longer:
+                return existing, f"短标题完整包含在长标题内（长度差 {length_gap}，本会被跳过）"
             continue
-        if SequenceMatcher(None, norm_title, existing).ratio() >= threshold:
-            return True
-    return False
+        ratio = SequenceMatcher(None, norm_title, existing).ratio()
+        if ratio >= threshold:
+            return existing, f"相似度 {ratio:.3f} ≥ {threshold}"
+    return None, None
 
 def ensure_runtime_tables(conn):
     ensure_article_feature_columns(conn)
@@ -2361,9 +2603,37 @@ def scrape_all_sites():
             current_run_token_best = {}
             current_run_body_best = {}
             recent_token_text_pairs = set()
+            # (口令签名, 文字签名) -> 库里那条标题，只为判重日志能报出撞上了谁
+            recent_signature_titles = {}
+            # 标题判重和正文签名判重共用这一批回看记录（recent_norm_titles /
+            # recent_token_text_pairs 都来自它），所以放宽窗口一次同时改掉了两处：
+            # 原来 30 分钟，同一条线报被两个站相隔一小时转发就会各进一条。
+            # 条数上限 300：判重是「每条候选 × 池子」比字符串，耗时随池子线性涨，
+            # 封顶之后单轮开销与入库量脱钩。ORDER BY 走 idx_articles_update_sort。
             recent_articles = conn.execute(
-                "SELECT title, token_only_signature FROM articles WHERE updated_at > (now() - interval '30 minutes')"
+                "SELECT title, token_only_signature FROM articles "
+                f"WHERE updated_at > (now() - interval '{TITLE_DEDUPE_WINDOW}') "
+                f"ORDER BY updated_at DESC, id DESC LIMIT {int(TITLE_DEDUPE_POOL_LIMIT)}"
             ).fetchall()
+            # 判重命中不能静默丢：记下「被判掉的标题 + 凭什么判的 + 撞上库里哪条」，
+            # 跑几天核对有没有误吞真线报。只打日志，不建表。
+            dedupe_stats = {"title": 0, "signature": 0, "printed": 0}
+            # 本轮已保留条目对应的标题（按签名），供日志报出「撞上本轮哪条」
+            run_body_titles = {}
+            run_token_titles = {}
+
+            def _log_dedupe(kind, dropped_title, rule, matched_title):
+                dedupe_stats[kind] += 1
+                if dedupe_stats["printed"] >= DEDUPE_LOG_MAX_PER_RUN:
+                    return
+                dedupe_stats["printed"] += 1
+                print(
+                    f"[DEDUPE][{kind}] 丢弃：{dropped_title} "
+                    f"| 依据：{rule} | 撞上：{matched_title}"
+                )
+                if dedupe_stats["printed"] == DEDUPE_LOG_MAX_PER_RUN:
+                    print(f"[DEDUPE] 本轮判重日志已达上限 {DEDUPE_LOG_MAX_PER_RUN} 条，后续只计数")
+
             # 已入库 URL 集合：用于判断「是否已经追上历史」。
             # 窗口取 12 小时，远大于列表页覆盖的时间跨度，足够可靠；
             # 条数很少（这个站点一天也就几百条），开销可以忽略。
@@ -2373,6 +2643,9 @@ def scrape_all_sites():
                 ).fetchall()
             }
             recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
+            # 归一化标题 -> 原始标题，只为判重日志能报出人话（不然打出的是去标点的串）
+            recent_title_by_norm = {normalize_title(row['title']): row['title'] for row in recent_articles}
+            run_title_by_norm = {}
             for row in recent_articles:
                 token_signature = row.get('token_only_signature')
                 if not token_signature:
@@ -2381,6 +2654,8 @@ def scrape_all_sites():
                     continue
                 text_signature = get_command_text_signature(row['title'])
                 recent_token_text_pairs.add((token_signature, text_signature))
+                # 判重日志要能说出「撞上库里哪条」，这里按签名反查标题。
+                recent_signature_titles.setdefault((token_signature, text_signature), row['title'])
             inserted_articles = []
 
             if due_sites:
@@ -2494,7 +2769,16 @@ def scrape_all_sites():
 
                         if not norm_title:
                             continue
-                        if is_similar_title(norm_title, seen_titles_this_run) or is_similar_title(norm_title, recent_norm_titles):
+                        dup_pool, dup_rule, dup_matched = None, None, None
+                        dup_matched, dup_rule = find_duplicate_title(norm_title, seen_titles_this_run)
+                        if dup_matched is None:
+                            dup_matched, dup_rule = find_duplicate_title(norm_title, recent_norm_titles)
+                            dup_pool = "近1小时已入库"
+                        else:
+                            dup_pool = "本轮已收"
+                        if dup_matched is not None:
+                            dup_label = run_title_by_norm.get(dup_matched) or recent_title_by_norm.get(dup_matched) or dup_matched
+                            _log_dedupe("title", title, f"{dup_rule}（{dup_pool}）", dup_label)
                             continue
                         token_signature = get_command_token_signature(title)
                         text_signature = get_command_text_signature(title)
@@ -2505,6 +2789,7 @@ def scrape_all_sites():
                             continue
 
                         seen_titles_this_run.add(norm_title)
+                        run_title_by_norm[norm_title] = title
                         tag = kw
                         for b_name, b_v in BANK_KEYWORDS.items():
                             if kw in b_v:
@@ -2529,6 +2814,10 @@ def scrape_all_sites():
 
                             # Cross-run dedupe: same token set and same normalized body text.
                             if (body_sig, body_text_sig) in recent_token_text_pairs:
+                                _log_dedupe(
+                                    "signature", title, "正文口令+正文文字与库里相同",
+                                    recent_signature_titles.get((body_sig, body_text_sig), ""),
+                                )
                                 continue
 
                             # Same-run dedupe: same token set.
@@ -2536,8 +2825,10 @@ def scrape_all_sites():
                             best_seen = current_run_body_best.get(body_sig)
                             if best_seen:
                                 if best_seen["site_order"] < site_order:
+                                    _log_dedupe("signature", title, f"本轮正文口令相同，站点 {best_seen['site_order']} 在前", run_body_titles.get(body_sig, ""))
                                     continue
                                 if best_seen["site_order"] == site_order and best_seen["text_score"] >= body_text_len:
+                                    _log_dedupe("signature", title, f"本轮正文口令相同且文字更少（{body_text_len} ≤ {best_seen['text_score']}）", run_body_titles.get(body_sig, ""))
                                     continue
                                 # 当前文章胜出（站点更靠前，或同站点文字更多）
                                 old_id = best_seen.get("article_id")
@@ -2546,9 +2837,12 @@ def scrape_all_sites():
                                     conn.execute("DELETE FROM articles WHERE id=%s", (old_id,))
                                     inserted_articles[:] = [a for a in inserted_articles if a["id"] != old_id]
                                 current_run_body_best[body_sig] = {"text_score": body_text_len, "site_order": site_order, "article_id": None}
+                                run_body_titles[body_sig] = title
                             else:
                                 # Same-run partial-overlap dedupe: keep the entry with more tokens / text.
                                 is_weaker = False
+                                weaker_than_sig = ""
+                                weaker_reason = ""
                                 for existing_sig, existing_data in current_run_body_best.items():
                                     existing_set = set(existing_sig.split("\n"))
                                     common = body_token_set & existing_set
@@ -2556,25 +2850,39 @@ def scrape_all_sites():
                                         continue
                                     if len(body_token_set) < len(existing_set):
                                         is_weaker = True
+                                        weaker_than_sig = existing_sig
+                                        weaker_reason = f"口令更少（{len(body_token_set)} < {len(existing_set)}）"
                                         break
                                     if len(body_token_set) == len(existing_set):
                                         if existing_data.get("site_order", 0) < site_order:
                                             is_weaker = True
+                                            weaker_than_sig = existing_sig
+                                            weaker_reason = "口令数相同，对方站点在前"
                                             break
                                         if existing_data.get("site_order", 0) == site_order and body_text_len <= existing_data["text_score"]:
                                             is_weaker = True
+                                            weaker_than_sig = existing_sig
+                                            weaker_reason = f"口令数相同且文字更少（{body_text_len} ≤ {existing_data['text_score']}）"
                                             break
                                 if is_weaker:
+                                    _log_dedupe("signature", title, f"本轮正文口令重叠，{weaker_reason}", run_body_titles.get(weaker_than_sig, ""))
                                     continue
                                 current_run_body_best[body_sig] = {"text_score": body_text_len, "site_order": site_order}
+                                run_body_titles[body_sig] = title
                         elif token_signature:
                             if (token_signature, text_signature) in recent_token_text_pairs:
+                                _log_dedupe(
+                                    "signature", title, "标题口令+文字与库里相同",
+                                    recent_signature_titles.get((token_signature, text_signature), ""),
+                                )
                                 continue
                             best_seen = current_run_token_best.get(token_signature)
                             if best_seen:
                                 if best_seen["site_order"] < site_order:
+                                    _log_dedupe("signature", title, f"本轮标题口令相同，站点 {best_seen['site_order']} 在前", run_token_titles.get(token_signature, ""))
                                     continue
                                 if best_seen["site_order"] == site_order and best_seen["text_score"] >= text_score:
+                                    _log_dedupe("signature", title, f"本轮标题口令相同且文字更少（{text_score} ≤ {best_seen['text_score']}）", run_token_titles.get(token_signature, ""))
                                     continue
                                 old_id = best_seen.get("article_id")
                                 if old_id:
@@ -2586,6 +2894,7 @@ def scrape_all_sites():
                                 "site_order": site_order,
                                 "article_id": None,
                             }
+                            run_token_titles[token_signature] = title
 
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             continue
@@ -2704,6 +3013,14 @@ def scrape_all_sites():
             conn.commit()
 
             total_new = sum(int(v.get("new", 0)) for v in site_stats.values())
+            # 判重统计：跑几天靠这行核对有没有误吞真线报（明细见 [DEDUPE] 日志）。
+            # 顺手带上池子规模，窗口/上限改完后单轮比对的条数就封顶在这里。
+            print(
+                f"[DEDUPE] 本轮判重：标题 {dedupe_stats['title']} 条 / "
+                f"签名 {dedupe_stats['signature']} 条；"
+                f"回看池 {len(recent_articles)}/{TITLE_DEDUPE_POOL_LIMIT} 条"
+                f"（窗口 {TITLE_DEDUPE_WINDOW}），本轮新增 {total_new} 条"
+            )
             if total_new:
                 # 有新文章入库就清掉页面缓存，让「有新线报」点开就是新的
                 invalidate_page_cache()

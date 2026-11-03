@@ -164,6 +164,54 @@
             gap: 5px;
         }
 
+        /* 自动刷新开关：贴在刷新条尾部，小巧不抢视线 */
+        .auto-refresh-toggle {
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+            color: #999;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .auto-refresh-toggle .track {
+            width: 30px;
+            height: 17px;
+            border-radius: 999px;
+            background: #d5d9e0;
+            position: relative;
+            transition: background .2s ease;
+            flex: 0 0 auto;
+        }
+
+        .auto-refresh-toggle .track::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 13px;
+            height: 13px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 2px rgba(0,0,0,.15);
+            transition: left .2s ease;
+        }
+
+        .auto-refresh-toggle.on {
+            color: #007aff;
+        }
+
+        .auto-refresh-toggle.on .track {
+            background: #007aff;
+        }
+
+        .auto-refresh-toggle.on .track::after {
+            left: 15px;
+        }
+
         .time-highlight {
             color: #ff3b30;
             font-weight: bold;
@@ -336,6 +384,10 @@
         <div class="refresh-bar">
             <i class="bi bi-clock-history"></i>
             每 2 分钟自动刷新，下次刷新：<span class="time-highlight" id="nextRefresh">{{ next_refresh_time }}</span>
+            <span class="auto-refresh-toggle" id="autoRefreshToggle" role="switch" aria-checked="false" tabindex="0" title="打开后：有新线报时页面自动刷新，无需手动点">
+                <span class="toggle-text">自动刷新</span>
+                <span class="track"></span>
+            </span>
         </div>
 
         {% if articles %}
@@ -427,11 +479,60 @@
                 .then(function (data) {
                     if (data && data.last_id > latestId) {
                         latestId = data.last_id;
+                        if (autoRefreshOn && !userBusy()) {
+                            // 自动刷新：记住滚动位置静默 reload，不打提示条
+                            try { sessionStorage.setItem('homeScroll', String(window.scrollY)); } catch (err) {}
+                            location.reload();
+                            return;
+                        }
                         banner.hidden = false;
                     }
                 })
                 .catch(function (err) { console.log("检查更新失败"); });
         }
+
+        // ===== 自动刷新开关（默认关 = 原来弹提示条手动点；开 = 静默 reload）=====
+        var AUTO_REFRESH_KEY = 'autoRefreshEnabled';
+        var toggleEl = document.getElementById('autoRefreshToggle');
+        var autoRefreshOn = false;
+        try { autoRefreshOn = localStorage.getItem(AUTO_REFRESH_KEY) === '1'; } catch (err) {}
+
+        function renderToggle() {
+            if (!toggleEl) return;
+            toggleEl.classList.toggle('on', autoRefreshOn);
+            toggleEl.setAttribute('aria-checked', autoRefreshOn ? 'true' : 'false');
+        }
+
+        function setAutoRefresh(on) {
+            autoRefreshOn = on;
+            try { localStorage.setItem(AUTO_REFRESH_KEY, on ? '1' : '0'); } catch (err) {}
+            renderToggle();
+        }
+
+        if (toggleEl) {
+            renderToggle();
+            toggleEl.addEventListener('click', function () { setAutoRefresh(!autoRefreshOn); });
+            toggleEl.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setAutoRefresh(!autoRefreshOn);
+                }
+            });
+        }
+
+        // 安全阀：正在打字（搜索框/输入框），或 5 秒内刚有过点击/滚动/触摸，
+        // 就不在这一拍 reload —— 顺延到下个边界，用户操作不被打断。
+        var lastInteraction = 0;
+        function userBusy() {
+            var active = document.activeElement;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+                return true;
+            }
+            return Date.now() - lastInteraction < 5000;
+        }
+        ['click', 'scroll', 'touchstart', 'keydown'].forEach(function (evt) {
+            window.addEventListener(evt, function () { lastInteraction = Date.now(); }, { passive: true });
+        });
 
         // 轮询对齐到刷新边界，而不是从页面加载那一刻起每 120 秒一次。
         // 边界后再多等 25 秒：cron 正是在边界触发的，抓取本身要几秒到几十秒，
