@@ -118,6 +118,13 @@ SITES_CONFIG = {
             "a[href*='origin']",
             "a[href*='jump']"
         ],
+        # 「查看原文」链接（a.xb-qlink，指向上游原帖如 v1.xianbao.net）在
+        # .xb-artfoot 区块里，不在 content_selector 命中范围内 —— 抓取时整块
+        # 被丢弃，缓存正文里没有，详情页只能退回本站地址。抓取时按这个选择器
+        # 把来源节点包进一个隐藏容器追加到缓存正文末尾，让现有抽取逻辑命中。
+        "original_url_extra_selectors": [
+            "a.xb-qlink"
+        ],
         "original_url_regexes": [
             r'(https?://[^\s<"\']+)'
         ]
@@ -968,6 +975,34 @@ def _is_boilerplate_only(html_content) -> bool:
     return len(_PUNCT_RE.sub("", rest)) < 10
 
 
+def _append_original_url_nodes(soup, site_key):
+    """把站点配置的 original_url_extra_selectors 命中节点收进一个隐藏容器。
+
+    线报酷的「查看原文」（a.xb-qlink，指向上游原帖）在 .xb-artfoot 区块里，
+    不在 content_selector 命中范围内，抓取时整块被丢弃 —— 缓存正文里没有它，
+    详情页 extract_original_url_info 只能退回本站地址。抓取时把这类节点包进
+    display:none 的容器追加到正文末尾：对页面渲染不可见，抽取逻辑零改动就能命中。
+    """
+    cfg = SITES_CONFIG.get(site_key, {})
+    selectors = cfg.get("original_url_extra_selectors") or []
+    if not selectors:
+        return ""
+    picked = []
+    for sel in selectors:
+        try:
+            picked.extend(soup.select(sel))
+        except Exception:
+            continue
+    if not picked:
+        return ""
+    wrap = soup.new_tag("div")
+    wrap["style"] = "display:none"
+    wrap["data-source-extra"] = "1"
+    for node in picked:
+        wrap.append(node.extract())
+    return str(wrap)
+
+
 def _collect_content_nodes(soup, selectors):
     """按顺序收集命中节点，跳过已被外层命中节点包含的子节点。
 
@@ -1276,7 +1311,12 @@ def view():
                 content_nodes = _collect_content_nodes(soup, selectors)
 
                 if content_nodes:
-                    full_raw_content = "".join(str(n) for n in content_nodes)
+                    # 「查看原文」这类来源节点不在 content_selector 范围内，
+                    # 摘出来追加到正文后面一起入缓存（见 _append_original_url_nodes）
+                    full_raw_content = (
+                        "".join(str(n) for n in content_nodes)
+                        + _append_original_url_nodes(soup, site_key)
+                    )
                     if _is_boilerplate_only(full_raw_content):
                         # 正文选择器已失效，只抓到「来源网址 / 免责声明」这类模板文字。
                         # 不写库，避免把模板文字当成正文长期缓存下来。
@@ -2726,8 +2766,13 @@ def scrape_all_sites():
                                     del raw_text
                                     selectors = SITES_CONFIG[skey]["content_selector"].split(",")
                                     # 必须在 decompose() 之前转成字符串，否则 Tag 会失效
-                                    raw_html = "".join(
+                                    content_html = "".join(
                                         str(n) for n in _collect_content_nodes(soup, selectors)
+                                    )
+                                    # 来源节点只在有正文时追加：正文为空只剩来源块的话，
+                                    # 会把一行「查看原文」当成整篇文章缓存下来
+                                    raw_html = content_html + (
+                                        _append_original_url_nodes(soup, skey) if content_html else ""
                                     )
                                     soup.decompose()
                                     del soup

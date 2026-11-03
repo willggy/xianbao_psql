@@ -163,7 +163,7 @@
             margin-bottom: 12px;
         }
 
-        /* 源网址一行：真实原始地址正常显示，退回本站地址时弱化并说明 */
+        /* 源网址一行：只显示提取到的真实原始地址；退回本站地址的不显示 */
         .source-line {
             display: flex;
             align-items: baseline;
@@ -193,13 +193,16 @@
             text-decoration: underline;
         }
 
-        .source-line.source-self {
+        /* 取不到源网址时的免责一行：比源网址行更轻 */
+        .source-note-line {
+            margin: 0 0 14px;
+            padding: 8px 10px;
             background: #fafafa;
-            border-style: dashed;
-        }
-
-        .source-line.source-self .source-note {
+            border: 1px dashed #e3e8ef;
+            border-radius: 8px;
+            font-size: 0.8rem;
             color: #9aa6b8;
+            word-break: break-all;
         }
 
         /* 源站自带的抓取时间戳，压成小字弱化 */
@@ -400,14 +403,13 @@
         <div class="article-card">
             <div class="article-title">{{ title }}</div>
 
-            {% if original_url %}
-            <div class="source-line {{ 'source-self' if not original_is_real }}">
+            {% if original_url and original_is_real %}
+            <div class="source-line">
                 <span class="source-label">源网址：</span>
                 <a href="{{ original_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ original_url }}</a>
-                {% if not original_is_real %}
-                <span class="source-note">（正文里没提取到活动原始地址，这里是本站页面）</span>
-                {% endif %}
             </div>
+            {% else %}
+            <div class="source-note-line">本站仅汇总公开线报，内容来源网络，真实性未经核实，请谨慎甄别</div>
             {% endif %}
 
             <div class="article-content">
