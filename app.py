@@ -345,7 +345,15 @@ def _get_pool():
                 )
             pool = ConnectionPool(
                 conninfo=DATABASE_URL,
-                kwargs={"row_factory": dict_row},
+                kwargs={
+                    "row_factory": dict_row,
+                    # psycopg3 会在同一连接上把重复执行的 SQL 自动 PREPARE 成
+                    # _pg3_N。本项目的 SQL 都是一轮一遍，预编译没有收益；一旦
+                    # 服务端会话与客户端缓存对不上（连接复用/事务回滚边界），
+                    # 每轮抓取会在开头就抛 prepared statement already exists。
+                    # 关掉自动预编译，从根上消除这类异常。
+                    "prepare_threshold": None,
+                },
                 min_size=1,
                 max_size=20,
                 open=False,          # 延迟到第一次 getconn 时才建立
