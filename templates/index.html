@@ -6,7 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>古希腊掌管羊毛的神</title>
     <link href="https://lib.baomitu.com/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://lib.baomitu.com/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <style>
         :root {
             --bg-color: #f5f5f7;
@@ -37,6 +36,45 @@
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+        }
+
+        /* 图标全部改成内联 SVG（原来用 bootstrap-icons：CSS 16KB + 字体 130KB，
+           整个首页只用到 4 个图标）。下面这几条复刻原图标字体的盒子尺寸，
+           换掉以后标题栏 / 刷新条的行高与图标落点都和原来一致。 */
+        .ui-icon {
+            display: inline-block;
+            flex: 0 0 auto;
+            vertical-align: -.125em;
+        }
+
+        .title-icon {
+            /* 原图标是字体字形，自带基线偏移；SVG 没有，会高 1px。
+               下移 1px 后与原来落点一致。 */
+            position: relative;
+            top: 1px;
+            width: 1em;
+            height: 1em;
+        }
+
+        .search-icon {
+            /* 原图标是 <i> 里的字形，行内盒子 14×14 */
+            width: 14px;
+            height: 14px;
+            vertical-align: -.125em;
+        }
+
+        .refresh-icon {
+            /* 字形自带基线偏移，SVG 没有，默认会高 1px，下移 1px 对齐。
+               13px 是原来字形占的行内盒子尺寸。 */
+            position: relative;
+            top: 1px;
+            width: 13px;
+            height: 13px;
+        }
+
+        /* 刷新条里那一处行盒高度和提示条不同，多下移 1px 反而偏低，单独归零 */
+        .refresh-bar .refresh-icon {
+            top: 0;
         }
 
         .title-bar {
@@ -338,7 +376,7 @@
     <header class="app-header">
         <div class="container" style="max-width: 800px; margin: 0 auto; padding: 0;">
             <div class="title-bar">
-                <i class="bi bi-activity" style="color: var(--ios-blue);"></i> 古希腊掌管羊毛的神
+                <svg class="ui-icon title-icon" style="color: var(--ios-blue);" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M6 2a.5.5 0 0 1 .47.33L10 12.036l1.53-4.208A.5.5 0 0 1 12 7.5h3.5a.5.5 0 0 1 0 1h-3.15l-1.88 5.17a.5.5 0 0 1-.94 0L6 3.964 4.47 8.171A.5.5 0 0 1 4 8.5H.5a.5.5 0 0 1 0-1h3.15l1.88-5.17A.5.5 0 0 1 6 2"/></svg> 古希腊掌管羊毛的神
             </div>
 
             <nav class="nav-wrapper">
@@ -359,7 +397,7 @@
                 <a href="/?tag={{ '羊毛精选'|urlencode }}" class="nav-pill nav-pill-featured {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
 
                 <button class="nav-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchCollapse">
-                    <i class="bi bi-search"></i>
+                    <svg class="ui-icon search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/></svg>
                 </button>
             </nav>
         </div>
@@ -378,11 +416,11 @@
     <div class="list-container">
         <div class="new-items" id="newItems" hidden>
             <a href="#" id="newItemsLink">
-                <i class="bi bi-arrow-up-circle"></i> 有新线报了，点击刷新
+                <svg class="ui-icon refresh-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8m15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0m-7.5 3.5a.5.5 0 0 1-1 0V5.707L5.354 7.854a.5.5 0 1 1-.708-.708l3-3a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 5.707z"/></svg> 有新线报了，点击刷新
             </a>
         </div>
         <div class="refresh-bar">
-            <i class="bi bi-clock-history"></i>
+            <svg class="ui-icon refresh-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022zm2.004.45a7 7 0 0 0-.985-.299l.219-.976q.576.129 1.126.342zm1.37.71a7 7 0 0 0-.439-.27l.493-.87a8 8 0 0 1 .979.654l-.615.789a7 7 0 0 0-.418-.302zm1.834 1.79a7 7 0 0 0-.653-.796l.724-.69q.406.429.747.91zm.744 1.352a7 7 0 0 0-.214-.468l.893-.45a8 8 0 0 1 .45 1.088l-.95.313a7 7 0 0 0-.179-.483m.53 2.507a7 7 0 0 0-.1-1.025l.985-.17q.1.58.116 1.17zm-.131 1.538q.05-.254.081-.51l.993.123a8 8 0 0 1-.23 1.155l-.964-.267q.069-.247.12-.501m-.952 2.379q.276-.436.486-.908l.914.405q-.24.54-.555 1.038zm-.964 1.205q.183-.183.35-.378l.758.653a8 8 0 0 1-.401.432z"/><path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0z"/><path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5"/></svg>
             每 2 分钟自动刷新，下次刷新：<span class="time-highlight" id="nextRefresh">{{ next_refresh_time }}</span>
             <span class="auto-refresh-toggle" id="autoRefreshToggle" role="switch" aria-checked="false" tabindex="0" title="打开后：有新线报时页面自动刷新，无需手动点">
                 <span class="toggle-text">自动刷新</span>

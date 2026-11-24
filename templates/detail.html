@@ -6,9 +6,318 @@
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>{{ title }}</title>
-    <link href="https://lib.baomitu.com/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://lib.baomitu.com/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <style>
+        /* 详情页只用得到 Bootstrap 的几条基础重置，原来整包引入要拉
+           CSS 41.7KB + 图标字体 130KB（本页只有一个返回箭头会用到），
+           为省这一百多 KB，这里按原版 bootstrap 5.3.3 的定义内联复刻：
+           正文里的 <p>/<ul>/<table>/<pre> 等的默认排版依赖它们，
+           删掉会改变缓存正文的显示效果。改这里请对照原文，不要随意精简。 */
+        *,
+        ::after,
+        ::before {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            margin: 0;
+            -webkit-text-size-adjust: 100%;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6 {
+            margin-top: 0;
+            margin-bottom: .5rem;
+            font-weight: 500;
+            line-height: 1.2;
+            color: inherit;
+        }
+
+        h1 {
+            font-size: calc(1.375rem + 1.5vw);
+        }
+
+        h2 {
+            font-size: calc(1.325rem + .9vw);
+        }
+
+        h3 {
+            font-size: calc(1.3rem + .6vw);
+        }
+
+        h4 {
+            font-size: calc(1.275rem + .3vw);
+        }
+
+        h5 {
+            font-size: 1.25rem;
+        }
+
+        h6 {
+            font-size: 1rem;
+        }
+
+        @media (min-width: 1200px) {
+            h1 {
+                font-size: 2.5rem;
+            }
+
+            h2 {
+                font-size: 2rem;
+            }
+
+            h3 {
+                font-size: 1.75rem;
+            }
+
+            h4 {
+                font-size: 1.5rem;
+            }
+        }
+
+        p {
+            margin-top: 0;
+            margin-bottom: 1rem;
+        }
+
+        ol,
+        ul {
+            padding-left: 2rem;
+            margin-top: 0;
+            margin-bottom: 1rem;
+        }
+
+        dl {
+            margin-top: 0;
+            margin-bottom: 1rem;
+        }
+
+        ol ol,
+        ol ul,
+        ul ol,
+        ul ul {
+            margin-bottom: 0;
+        }
+
+        dt {
+            font-weight: 700;
+        }
+
+        dd {
+            margin-bottom: .5rem;
+            margin-left: 0;
+        }
+
+        blockquote {
+            margin: 0 0 1rem;
+        }
+
+        figure {
+            margin: 0 0 1rem;
+        }
+
+        address {
+            margin-bottom: 1rem;
+            font-style: normal;
+            line-height: inherit;
+        }
+
+        b,
+        strong {
+            font-weight: bolder;
+        }
+
+        sub,
+        sup {
+            position: relative;
+            font-size: .75em;
+            line-height: 0;
+            vertical-align: baseline;
+        }
+
+        sub {
+            bottom: -.25em;
+        }
+
+        sup {
+            top: -.5em;
+        }
+
+        /* 链接颜色：原版用的是 --bs-link-color-rgb（#0d6efd） */
+        a {
+            color: rgba(13, 110, 253, var(--link-opacity, 1));
+            text-decoration: underline;
+        }
+
+        a:hover {
+            --link-opacity: 1;
+            color: rgb(10, 88, 202);
+        }
+
+        a:not([href]):not([class]),
+        a:not([href]):not([class]):hover {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        code,
+        kbd,
+        pre,
+        samp {
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 1em;
+        }
+
+        pre {
+            display: block;
+            margin-top: 0;
+            margin-bottom: 1rem;
+            overflow: auto;
+            font-size: .875em;
+        }
+
+        pre code {
+            font-size: inherit;
+            color: inherit;
+            word-break: normal;
+        }
+
+        code {
+            font-size: .875em;
+            color: #d63384;
+            word-wrap: break-word;
+        }
+
+        a > code {
+            color: inherit;
+        }
+
+        kbd {
+            padding: .1875rem .375rem;
+            font-size: .875em;
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            color: #fff;
+            background-color: #212529;
+            border-radius: .25rem;
+        }
+
+        kbd kbd {
+            padding: 0;
+            font-size: 1em;
+        }
+
+        img,
+        svg {
+            vertical-align: middle;
+        }
+
+        table {
+            caption-side: bottom;
+            border-collapse: collapse;
+        }
+
+        caption {
+            padding-top: .5rem;
+            padding-bottom: .5rem;
+            color: rgba(33, 37, 41, .75);
+            text-align: left;
+        }
+
+        th {
+            text-align: inherit;
+            text-align: -webkit-match-parent;
+        }
+
+        tbody,
+        td,
+        tfoot,
+        th,
+        thead,
+        tr {
+            border-color: inherit;
+            border-style: solid;
+            border-width: 0;
+        }
+
+        hr {
+            margin: 1rem 0;
+            color: inherit;
+            border: 0;
+            border-top: 1px solid;
+            opacity: .25;
+        }
+
+        iframe {
+            border: 0;
+        }
+
+        /* 表单控件（正文里「复制」按钮是 JS 建出来的 <button>）默认不继承字体，
+           原版靠 Bootstrap 的这条规则统一成正文文字样式，去掉后按钮会变 Arial */
+        button,
+        input,
+        optgroup,
+        select,
+        textarea {
+            margin: 0;
+            font-family: inherit;
+            font-size: inherit;
+            line-height: inherit;
+        }
+
+        button,
+        select {
+            text-transform: none;
+        }
+
+        select {
+            word-wrap: normal;
+        }
+
+        textarea {
+            resize: vertical;
+        }
+
+        button {
+            border-radius: 0;
+        }
+
+        [type=button],
+        [type=reset],
+        [type=submit],
+        button {
+            -webkit-appearance: button;
+        }
+
+        /* 原来由 Bootstrap 提供的两个工具类（px-3 / me-1），值照抄原版 */
+        .px-3 {
+            padding-right: 1rem !important;
+            padding-left: 1rem !important;
+        }
+
+        .me-1 {
+            margin-right: .25rem !important;
+        }
+
+        /* 返回箭头的内联 SVG（原来用 bootstrap-icons 字体，一个图标要拉 130KB）。
+           尺寸对齐原来的 <i> 图标盒子：宽 1em（16px）、高 1.5em（行高 24px），
+           图形本身仍是 16×16。SVG 没有字体基线，默认贴着盒子顶边，
+           比原来的字形高 1px；用相对定位下移 1px，箭头落点与原来一致。 */
+        .back-icon {
+            position: relative;
+            top: 1px;
+            width: 1em;
+            height: 1.5em;
+            flex: 0 0 auto;
+        }
+
         :root {
             --bg-color: #f2f4f8;
             --text-main: #1d1d1f;
@@ -20,12 +329,22 @@
             background: var(--bg-color);
             min-height: 100vh;
             padding: 15px 0;
+            /* 字体栈保持和原来一模一样：原页面里这条规则排在 Bootstrap 之后，
+               同优先级后者胜出，实际生效的一直是这一条的字体。 */
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 1rem;
+            font-weight: 400;
+            line-height: 1.5;
             color: var(--text-main);
         }
 
         .container {
+            width: 100%;
             max-width: 800px;
+            /* 原来 padding 由 .container（gutter 1.5rem 的一半）+ .px-3（1rem）叠加；
+               .px-3 现在带 !important 仍然生效，这里只需补上 container 那一份。 */
+            padding-right: .75rem;
+            padding-left: .75rem;
             margin: 0 auto;
         }
 
@@ -38,10 +357,14 @@
             text-decoration: none;
             color: #666;
             font-size: 1rem;
-            display: inline-flex;
+            /* 用块级 flex 而不是 inline-flex：原来的图标是字体字形，自带文字基线，
+               行盒高度正好 24px；换成 SVG 后（没有基线）内联行盒会多出 5px 下缘，
+               返回栏整体被撑高。改成块级 flex + fit-content，宽度仍是内容宽，
+               高度回到 24px，和换之前一致。 */
+            display: flex;
+            width: fit-content;
             align-items: center;
         }
-
         .article-card {
             background: #fff;
             border-radius: 16px;
@@ -397,7 +720,7 @@
 <body>
     <div class="container px-3">
         <div class="back-nav">
-            <a href="/"><i class="bi bi-chevron-left me-1"></i>返回首页</a>
+            <a href="/"><svg class="back-icon me-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0"/></svg>返回首页</a>
         </div>
 
         <div class="article-card">

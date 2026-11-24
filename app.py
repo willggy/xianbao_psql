@@ -190,6 +190,11 @@ TITLE_SIMILARITY_THRESHOLD = 0.85
 # 不设上限的话入库量一涨，单轮耗时跟着涨（见 idx_articles_update_sort 索引）。
 TITLE_DEDUPE_WINDOW = "1 hour"
 TITLE_DEDUPE_POOL_LIMIT = 300
+# 跨站「标题完全相同」单独一层，窗口拉长到 12 小时（见 _load_cross_site_exact_titles）。
+# 只用 1 小时窗口治不住跨站转发：爱猴列表页回溯约 10 小时，重复条目总能在
+# 掉出列表页之前熬到窗口过期，然后当成新文章入库并再推一遍（11-24 实测：
+# 09:04 线报酷入库，同一条爱猴帖 09:06~10:04 每轮被判重丢掉，10:08 冒出来）。
+CROSS_SITE_EXACT_WINDOW = "12 hours"
 # 「短的完整包含在长的里就算重」：只对长度差 > 8、本来会被直接跳过的配对生效，
 # 且短的一方至少这么多归一化字符，否则「工行」这类两字短标题会被误吞进任何长标题。
 TITLE_CONTAINMENT_MIN_LEN = 8
@@ -1256,6 +1261,84 @@ def index():
                            latest_id=latest_id,
                            today_str=now.strftime("%Y-%m-%d"))
 
+# ===== 线报酷详情页访问时补刷 =====
+# 抓取入库那一刻拿到的正文/评论只是快照，之后上游变了不会跟着动。
+# 详情页被访问时（不管缓存里有没有评论）同步重抓一次详情页：
+# 抓到的内容直接作为本次响应渲染（用户当场看到最新状态），同时覆盖回缓存。
+# 每篇最多 COMMENT_REFRESH_MAX_TRIES 次，两次间隔 COMMENT_REFRESH_INTERVAL
+# 分钟，防止频繁访问把源站打爆。
+COMMENT_REFRESH_MAX_TRIES = 3     # 每篇最多补刷次数
+COMMENT_REFRESH_INTERVAL = 10     # 分钟：两次补刷的最小间隔
+_COMMENT_REFRESH_STATE = {}       # url -> {"tries": int, "last": timestamp}
+_comment_refresh_lock = threading.Lock()
+
+
+def _fetch_xianbao_detail_raw(url, timeout=10):
+    """重抓一篇线报酷详情页，返回缓存正文片段；抓不到/是模板文字返回 None。"""
+    r = session_req.get(url, timeout=timeout)
+    r.encoding = "utf-8"
+    soup = BeautifulSoup(r.text, "html.parser")
+    selectors = SITES_CONFIG["xianbao"]["content_selector"].split(",")
+    content_nodes = _collect_content_nodes(soup, selectors)
+    if not content_nodes:
+        return None
+    full_raw_content = (
+        "".join(str(n) for n in content_nodes)
+        + _append_original_url_nodes(soup, "xianbao")
+    )
+    if _is_boilerplate_only(full_raw_content):
+        return None
+    return full_raw_content
+
+
+def _persist_article_content(conn, url, raw_html):
+    """把补抓的片段写回缓存表（调用方负责 commit/rollback）。"""
+    conn.execute(
+        "INSERT INTO article_content(url, content) VALUES(%s, %s) "
+        "ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP",
+        (url, raw_html),
+    )
+
+
+def _refresh_xianbao_comments_once(url):
+    """同步补刷：重抓→写缓存。成功返回新片段，失败返回 None。"""
+    try:
+        # 这次是同步补刷，用户在等页面：超时要短，抓不到就退回旧缓存
+        raw = _fetch_xianbao_detail_raw(url, timeout=6)
+        if raw is None:
+            print(f"[CMT REFRESH] 未抓到有效正文: {url}")
+            return None
+        conn = get_db_connection()
+        try:
+            _persist_article_content(conn, url, raw)
+            conn.commit()
+        finally:
+            close_db_connection(conn)
+        fujia = BeautifulSoup(raw, "html.parser").select_one("#art-fujia, .art-fujia")
+        n_li = len(fujia.select(".ul .li, .comment-list .li")) if fujia else 0
+        print(f"[CMT REFRESH] 已更新缓存，评论条目 {n_li} 条: {url}")
+        return raw
+    except Exception as e:
+        print(f"[CMT REFRESH] 失败: {url} | {e}")
+        return None
+
+
+def _claim_comment_refresh(url):
+    """登记一次补刷名额。返回 True=允许这次；False=次数用完或间隔未到。"""
+    now = time.time()
+    with _comment_refresh_lock:
+        st = _COMMENT_REFRESH_STATE.get(url)
+        if st is None:
+            st = _COMMENT_REFRESH_STATE[url] = {"tries": 0, "last": 0.0}
+        if st["tries"] >= COMMENT_REFRESH_MAX_TRIES:
+            return False
+        if st["last"] and now - st["last"] < COMMENT_REFRESH_INTERVAL * 60:
+            return False
+        st["tries"] += 1
+        st["last"] = now
+        return True
+
+
 @app.route("/view")
 @render_cached(ttl=180)
 def view():
@@ -1292,6 +1375,18 @@ def view():
             print(f"[CONTENT HEAL] 丢弃疑似脏缓存: {url}")
             cached_html = None
         content = ""
+
+        # 线报酷详情页补刷（同步，当场生效）：不管缓存里有没有评论，只要
+        # 这篇的补刷名额还没用完、距上次够久，就先重抓一次——抓到就直接用它
+        # 渲染本次响应（用户当场看到最新正文/评论）并覆盖回缓存；抓不到再退回旧缓存。
+        # 每篇最多 COMMENT_REFRESH_MAX_TRIES 次、间隔 COMMENT_REFRESH_INTERVAL。
+        # 没有缓存时下面的分支本来就会实时抓，不用在这里重抓一遍。
+        refreshed_raw = None
+        if site_key == "xianbao" and cached_html and _claim_comment_refresh(url):
+            refreshed_raw = _refresh_xianbao_comments_once(url)
+
+        if refreshed_raw is not None:
+            cached_html = refreshed_raw
 
         if cached_html:
             original_url, original_is_real, original_reason = extract_original_url_info(
@@ -1356,6 +1451,7 @@ def view():
             original_url, original_is_real = "", False
         if original_reason:
             print(f"[ORIGINAL URL] {site_key} id={article_id} real={original_is_real} | {original_reason} | {original_url}")
+
         return render_template(
             "detail.html",
             title=title,
@@ -2013,6 +2109,10 @@ def cron_scrape():
     with _cron_guard_lock:
         elapsed = now_ts - _cron_last_start_ts
         if _cron_last_start_ts and elapsed < CRON_MIN_INTERVAL_SEC:
+            wait = CRON_MIN_INTERVAL_SEC - elapsed
+            # 也记一行日志：间隔保护拦下来的触发原本不留痕迹，
+            # 日志上会看成「这段时间没跑过」。
+            _log_scrape_event(f"抓取跳过：距上次触发仅 {elapsed:.0f}s（too_frequent，再等 {wait:.0f}s）")
             return {
                 "status": "skipped",
                 "reason": "too_frequent",
@@ -2081,6 +2181,32 @@ def find_duplicate_title(norm_title, norm_titles, threshold=TITLE_SIMILARITY_THR
         if ratio >= threshold:
             return existing, f"相似度 {ratio:.3f} ≥ {threshold}"
     return None, None
+
+def _load_cross_site_exact_titles(conn):
+    """跨站精确判重的回看池：归一化标题 -> 站点。
+
+    范围：近 CROSS_SITE_EXACT_WINDOW 内的全部抓取文章（与 1 小时池同一口径，
+    不排除置顶/精选）。
+    用途：候选标题归一化后若与此池中「另一站点」的标题完全相等，
+    说明是跨站转发同一条线报 —— 不入库不推送，永久压掉（只要它在
+    对方入库 12 小时内出现，而列表页回溯一般到不了 12 小时）。
+    只做「完全相等」，不做相似度：编号系列（省钱卡4/省钱卡5）这类
+    相邻编号的真新线报不会被误吞。
+    """
+    rows = conn.execute(
+        "SELECT title, site_source FROM articles "
+        f"WHERE updated_at > (now() - interval '{CROSS_SITE_EXACT_WINDOW}')"
+    ).fetchall()
+    pool = {}
+    for row in rows:
+        norm = normalize_title(row["title"] or "")
+        if not norm:
+            continue
+        # 同一归一化标题多站都发过时，记下全部站点；候选只有与池中所有
+        # 站点都不同才放行（等于「和谁都不算同站」才入库）。
+        pool.setdefault(norm, set()).add(row["site_source"])
+    return pool
+
 
 def ensure_runtime_tables(conn):
     ensure_article_feature_columns(conn)
@@ -2451,10 +2577,28 @@ def strip_command_token(text):
     return stripped.strip()
 
 
-def fetch_article_command_token(url, site_key):
+def fetch_article_command_token(url, site_key, raw_html=None):
+    """取这篇文章正文里的复制口令。
+
+    raw_html 不为空时直接复用已抓好的正文，不再发网络请求：
+    预取阶段（fetch_and_parse）已经把这篇的正文抓下来放进 body_cache 了，
+    这里为了取口令又原样抓一遍，既慢又会拖慢整轮抓取（gunicorn 300 秒
+    超时会杀掉线程）。行为不变 —— 提取规则和联网抓完全一样。
+    """
     if not url or site_key not in SITES_CONFIG:
         return ""
     try:
+        if raw_html:
+            # 复用已抓的正文：取纯文字再提口令，和联网路径等价
+            try:
+                soup = BeautifulSoup(raw_html, "html.parser")
+            except Exception:
+                soup = None
+            if soup is not None:
+                text = soup.get_text(" ", strip=True)
+                soup.decompose()
+                return "\n".join(extract_command_tokens(text))
+            return ""
         r = session_req.get(url, timeout=10)
         r.encoding = "utf-8"
         soup = BeautifulSoup(r.text, "html.parser")
@@ -2583,12 +2727,41 @@ def send_match_notifications(new_articles):
 
     return results
 
+def _log_scrape_event(text):
+    """往 scrape_log 补一行跳过/异常记录。
+
+    正常轮次在 scrape_all_sites 末尾写日志；lock_busy / too_frequent /
+    异常这三种情况原来什么都不留，日志时间轴上就会「凭空少一块」，
+    分不清是没触发还是触发了没跑完。这里补一条只写日志、不影响任何
+    抓取行为；写失败也不抛（日志是辅助，别让它把主流程带挂）。
+    跳过行不打推送统计，格式与正常行区分开。
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            conn.execute(
+                'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
+                (f"[{get_beijing_now().strftime('%m-%d %H:%M')}] {text}",),
+            )
+            conn.execute(
+                'DELETE FROM scrape_log WHERE id NOT IN ('
+                'SELECT id FROM scrape_log ORDER BY id DESC LIMIT 1000'
+                ')'
+            )
+            conn.commit()
+        finally:
+            close_db_connection(conn)
+    except Exception as e:
+        print(f"[WARN] scrape_log(skip) failed: {e}")
+
+
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
     started_at = time.time()
 
     if scrape_lock.locked():
         print("scrape lock busy, skip this run")
+        _log_scrape_event("抓取跳过：上一轮仍在运行（lock_busy）")
         return {
             "status": "skipped",
             "reason": "lock_busy",
@@ -2655,6 +2828,10 @@ def scrape_all_sites():
                 f"WHERE updated_at > (now() - interval '{TITLE_DEDUPE_WINDOW}') "
                 f"ORDER BY updated_at DESC, id DESC LIMIT {int(TITLE_DEDUPE_POOL_LIMIT)}"
             ).fetchall()
+            # 跨站精确判重池（12 小时）：候选与「另一站点」已入库的同题文章相遇
+            # 时，不再等到 1 小时窗口过期冒出来，直接压掉（不入库不推送）。
+            # 需要站点来源，所以单独一池；只做完全相等，不碰相似度。
+            cross_site_exact = _load_cross_site_exact_titles(conn)
             # 判重命中不能静默丢：记下「被判掉的标题 + 凭什么判的 + 撞上库里哪条」，
             # 跑几天核对有没有误吞真线报。只打日志，不建表。
             dedupe_stats = {"title": 0, "signature": 0, "printed": 0}
@@ -2747,10 +2924,46 @@ def scrape_all_sites():
                         update_scrape_state(conn, skey, result.get("last_seen_url") or None, now_beijing)
                         continue
 
+                    # 标题判重提前到预取之前：判重只依赖列表页已有的标题，
+                    # 不碰网络；被判掉的条目本来也不会进后面的正文判重池，
+                    # 所以先丢后丢结果一致，但省掉了为它们白抓的详情页请求
+                    # （跨站同题每 4 分钟一轮、能白抓十几次，见 11-24 案例）。
+                    # 注意：这里只做标题级判定；正文签名判重仍在后面（需要正文）。
+                    for item in result["candidates"]:
+                        norm_title = normalize_title(item["title"])
+                        if not norm_title:
+                            continue
+                        dup_matched, dup_rule = find_duplicate_title(norm_title, seen_titles_this_run)
+                        dup_pool = "本轮已收" if dup_matched is not None else None
+                        if dup_matched is None:
+                            dup_matched, dup_rule = find_duplicate_title(norm_title, recent_norm_titles)
+                            dup_pool = "近1小时已入库" if dup_matched is not None else None
+                        if dup_matched is None:
+                            # 跨站精确层：归一化标题与另一站点的已入库文章完全相等
+                            # → 跨站转发，12 小时内永久压掉（不入库不推送）。
+                            other_sites = cross_site_exact.get(norm_title)
+                            if other_sites and skey not in other_sites:
+                                dup_matched = norm_title
+                                dup_rule = f"跨站标题完全相同（近{CROSS_SITE_EXACT_WINDOW}，来源 {'、'.join(sorted(other_sites))}）"
+                                dup_pool = "跨站12小时池"
+                        if dup_matched is not None:
+                            dup_label = run_title_by_norm.get(dup_matched) or recent_title_by_norm.get(dup_matched) or dup_matched
+                            _log_dedupe("title", item["title"], f"{dup_rule}（{dup_pool}）", dup_label)
+                            item["title_dropped"] = True
+                            continue
+                        # 通过标题判重的条目也登记进本轮池（与主循环同条件：
+                        # 命中关键词才登记），同一列表页里同题出现两次时，
+                        # 第二次要在预取前就被判掉，不能只靠主循环登记。
+                        if keyword_match_in_title(item["title"], base_keywords):
+                            seen_titles_this_run.add(norm_title)
+                            run_title_by_norm.setdefault(norm_title, item["title"])
+
                     # Prefetch article bodies in parallel for candidates likely to need alert matching.
                     body_cache = {}
                     pre_fetch = []
                     for item in result["candidates"]:
+                        if item.get("title_dropped"):
+                            continue
                         kw = keyword_match_in_title(item["title"], base_keywords)
                         if kw and kw in ALERT_ALL_VALS and skey in SITES_CONFIG:
                             pre_fetch.append((item["url"], skey, kw))
@@ -2814,16 +3027,10 @@ def scrape_all_sites():
 
                         if not norm_title:
                             continue
-                        dup_pool, dup_rule, dup_matched = None, None, None
-                        dup_matched, dup_rule = find_duplicate_title(norm_title, seen_titles_this_run)
-                        if dup_matched is None:
-                            dup_matched, dup_rule = find_duplicate_title(norm_title, recent_norm_titles)
-                            dup_pool = "近1小时已入库"
-                        else:
-                            dup_pool = "本轮已收"
-                        if dup_matched is not None:
-                            dup_label = run_title_by_norm.get(dup_matched) or recent_title_by_norm.get(dup_matched) or dup_matched
-                            _log_dedupe("title", title, f"{dup_rule}（{dup_pool}）", dup_label)
+                        # 标题判重（本轮池/1小时池/跨站12小时池）已在预取前做完，
+                        # 被丢的条目标了 title_dropped，通过的不可能再撞上
+                        # （判定逻辑与顺序和原来逐条一致，这里不再重复判）。
+                        if item.get("title_dropped"):
                             continue
                         token_signature = get_command_token_signature(title)
                         text_signature = get_command_text_signature(title)
@@ -2990,12 +3197,20 @@ def scrape_all_sites():
                                         (matched_alert, article_id),
                                     )
                                 if matched_alert:
+                                    # 口令优先从标题取；标题里没有时从正文取。
+                                    # 正文已经在预取阶段抓进 body_cache 了，
+                                    # 直接复用，别再发一次网络请求（慢且有超时风险）。
+                                    cmd_token = "\n".join(extract_command_tokens(title))
+                                    if not cmd_token:
+                                        cmd_token = fetch_article_command_token(
+                                            url, skey, raw_html=body_raw_html or None
+                                        )
                                     inserted_articles.append(
                                         {
                                             "id": article_id,
                                             "view_url": build_article_view_url(article_id),
                                             "title": title,
-                                            "command_token": "\n".join(extract_command_tokens(title)) or fetch_article_command_token(url, skey),
+                                            "command_token": cmd_token,
                                             "url": url,
                                             "tag": tag,
                                             "site_key": skey,
@@ -3048,7 +3263,10 @@ def scrape_all_sites():
             conn.execute("DELETE FROM visit_stats WHERE last_visit < (now() - interval '90 days')")
             conn.execute(
                 'INSERT INTO scrape_log(last_scrape) VALUES(%s)',
-                (f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified}",),
+                (
+                    f"[{now_beijing.strftime('%m-%d %H:%M')}] {log_stats} 推送：{notified} "
+                    f"耗时：{time.time() - started_at:.0f}s",
+                ),
             )
             conn.execute(
                 'DELETE FROM scrape_log WHERE id NOT IN ('
@@ -3085,6 +3303,9 @@ def scrape_all_sites():
                 except Exception:
                     pass
             print(f"Scrape Loop Error: {e}")
+            # 异常轮次原来不留日志：文章可能已经入库，日志却断档，
+            # 看着像「没跑」。补一行，标明是异常终止。
+            _log_scrape_event(f"抓取异常：{str(e)[:120]}（耗时 {time.time() - started_at:.0f}s）")
             return {
                 "status": "error",
                 "error": str(e),
